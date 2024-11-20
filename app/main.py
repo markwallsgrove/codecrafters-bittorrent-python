@@ -15,7 +15,10 @@ def decode_bencode(bencoded_value):
             raise ValueError("Invalid encoded value")
         return bencoded_value[first_colon_index+1:]
     elif chr(bencoded_value[0]) == "i" and chr(bencoded_value[-1]) == "e":
-        return bencoded_value[1:-1]
+        encoded_int = bencoded_value[1:-1].decode("utf-8")
+        if encoded_int.isdigit():
+            return int(encoded_int)
+        raise ValueError("Invalid encoded value")
     else:
         raise NotImplementedError("Only strings are supported at the moment")
 
