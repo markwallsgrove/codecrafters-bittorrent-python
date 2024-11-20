@@ -8,6 +8,13 @@ import sys
 #
 # - decode_bencode(b"5:hello") -> b"hello"
 # - decode_bencode(b"10:hello12345") -> b"hello12345"
+
+def decode_int(value):
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError("Invalid encoded value")
+
 def decode_bencode(bencoded_value):
     if chr(bencoded_value[0]).isdigit():
         first_colon_index = bencoded_value.find(b":")
@@ -15,10 +22,7 @@ def decode_bencode(bencoded_value):
             raise ValueError("Invalid encoded value")
         return bencoded_value[first_colon_index+1:]
     elif chr(bencoded_value[0]) == "i" and chr(bencoded_value[-1]) == "e":
-        encoded_int = bencoded_value[1:-1].decode("utf-8")
-        if encoded_int.isdigit():
-            return int(encoded_int)
-        raise ValueError("Invalid encoded value")
+        return decode_int(bencoded_value[1:-1].decode("utf-8"))
     else:
         raise NotImplementedError("Only strings are supported at the moment")
 
