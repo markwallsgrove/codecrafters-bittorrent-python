@@ -1,20 +1,16 @@
 import json
 import os
 import sys
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TypeVar, Union
 from logging import getLevelNamesMapping, getLogger, basicConfig, WARN
 
+log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "WARN")] or WARN
+
 basicConfig(
-    level=WARN,
+    level=log_level,
     format="[%(filename)s:%(lineno)s - %(funcName)s()] %(message)s",
 )
 logger = getLogger(__name__)
-
-log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "WARN")]
-if log_level:
-    logger.setLevel(log_level)
-
-logger.setLevel(WARN)
 
 # import bencodepy - available if you need it!
 # import requests - available if you need it!
@@ -24,7 +20,7 @@ logger.setLevel(WARN)
 # - decode_bencode(b"5:hello") -> b"hello"
 # - decode_bencode(b"10:hello12345") -> b"hello12345"
 
-
+ValueType = Union[int, str, list["ValueType"]]
 
 
 def decode_int(value: bytes) -> Optional[Tuple[int, bytes]]:
@@ -63,7 +59,9 @@ def decode_string(value: bytes) -> Optional[Tuple[str, bytes]]:
     str_len = bytes()
 
     while len(value) > 0 and value[0] != ord(":"):
-        str_len += b"".join([str_len, value[0:1]])
+        logger.debug(f"string length: '{str_len}', value: '{value[0:1]}'")
+        str_len = b"".join([str_len, value[0:1]])
+        logger.debug(f"string length after append: '{str_len}'")
         value = value[1:]
 
     if len(value) == 0 or value[0] != ord(":"):
@@ -71,13 +69,16 @@ def decode_string(value: bytes) -> Optional[Tuple[str, bytes]]:
         return None
 
     try:
-        length = int(str_len)
+        logger.debug(f"string length: '{str_len}'")
+        length = int(str_len.decode())
     except ValueError:
         logger.debug(f"invalid string length: '{str_len}'")
         return None
 
-    if len(value) < length + 1:
-        logger.debug(f"string length too long: '{length}' >  '{len(value)}'")
+    logger.debug(f"string length: '{length}', {type(length)}, {length + 1}")
+
+    if length + 1 > len(value):
+        logger.debug(f"string length too long: '{length + 1} {type(length)}' >  '{len(value)}'")
         return None
 
     try:
@@ -89,7 +90,7 @@ def decode_string(value: bytes) -> Optional[Tuple[str, bytes]]:
         return None
 
 
-def decode_list(value: bytes) -> Optional[Tuple[list[int | str], bytes]]:
+def decode_list(value: bytes) -> Optional[Tuple[list[ValueType], bytes]]:
     header, body = value[0], value[1:]
 
     if header != ord("l"):
@@ -100,7 +101,7 @@ def decode_list(value: bytes) -> Optional[Tuple[list[int | str], bytes]]:
     
     elements = []
 
-    while len(body) > 0 and not (len(body) == 1 and body[0] == ord("e")):
+    while len(body) > 0 and not body[0] == ord("e"):
         decoded_value = decode(body)
         if decoded_value is None:
             raise ValueError("Invalid encoded value")
@@ -109,19 +110,20 @@ def decode_list(value: bytes) -> Optional[Tuple[list[int | str], bytes]]:
         if element is None:
             raise ValueError("Invalid encoded value")
 
-        if isinstance(element, list):
-            raise ValueError("cannot have lists in lists")
-
         elements.append(element)
 
-    if len(body) != 1 or body[0] != ord("e"):
+    if len(body) == 0:
         logger.debug(f"invalid end of list: '{body}'")
         return None
 
-    return elements, bytes()
+    if body[0] != ord("e"):
+        logger.debug(f"invalid end of list: '{body[0]}'")
+        return None
+
+    return elements, body[1:]
 
 
-def decode(value: bytes) -> Optional[Tuple[str | int | list[str | int], bytes]]:
+def decode(value: bytes) -> Optional[Tuple[ValueType, bytes]]:
     decorder = [decode_int, decode_string, decode_list]
 
     for decoder in decorder:
@@ -132,38 +134,6 @@ def decode(value: bytes) -> Optional[Tuple[str | int | list[str | int], bytes]]:
         return decoded_value
 
     raise ValueError(f"failed to decode value: '{value}'")
-
-
-
-# def decode_string(value: bytes) -> Optional[str]:
-#     if chr(value[0]).isdigit():
-#         first_colon_index = value.find(b":")
-#         if first_colon_index == -1:
-#             raise ValueError("Invalid encoded value")
-#         return str(value[first_colon_index+1:])
-#
-#     return None
-#
-#
-# def decode_integer(value: bytes) -> Optional[int]:
-#     if chr(value[0]) == "i" and chr(value[-1]) == "e":
-#         try:
-#             return int(value)
-#         except ValueError:
-#             raise ValueError("Invalid encoded value")
-#
-#     return None
-#
-
-# def decode(value: str) -> Optional[str | int | list[str]]:
-#     decoders = [decode_string, decode_integer, decode_list]
-#
-#     for decoder in decoders:
-#         result = decoder(value)
-#         if result:
-#             return result
-#
-#     raise NotImplementedError("Only strings and integers are supported at the moment")
 
 
 def main():
