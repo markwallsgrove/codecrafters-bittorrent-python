@@ -1,7 +1,7 @@
 import json
 import os
 import sys
-from typing import Optional, Tuple, TypeVar, Union
+from typing import Optional, Tuple, Union
 from logging import getLevelNamesMapping, getLogger, basicConfig, WARN
 
 log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "WARN")] or WARN
@@ -20,7 +20,7 @@ logger = getLogger(__name__)
 # - decode_bencode(b"5:hello") -> b"hello"
 # - decode_bencode(b"10:hello12345") -> b"hello12345"
 
-ValueType = Union[int, str, list["ValueType"]]
+ValueType = Union[int, str, list["ValueType"], dict["ValueType", "ValueType"]]
 
 
 def decode_int(value: bytes) -> Optional[Tuple[int, bytes]]:
@@ -123,8 +123,44 @@ def decode_list(value: bytes) -> Optional[Tuple[list[ValueType], bytes]]:
     return elements, body[1:]
 
 
+def decode_dict(value: bytes) -> Optional[Tuple[dict[ValueType, ValueType], bytes]]:
+    header, body = value[0], value[1:]
+
+    # d3:foo3:bar5:helloi52ee
+    if header != ord("d"):
+        logger.debug(f"invalid dict header: '{header}'")
+        return None
+
+    logger.debug("found a dict, decoding")
+
+    elements = {}
+
+    while len(body) > 0 and not body[0] == ord("e"):
+        key_value = decode(body)
+        if key_value is None:
+            raise ValueError("Invalid encoded value")
+        k, body = key_value
+
+        value_value = decode(body)
+        if value_value is None:
+            raise ValueError("Invalid encoded value")
+        v, body = value_value
+
+        elements[k] = v
+
+    if len(body) == 0:
+        logger.debug(f"invalid end of dict: '{body}'")
+        return None
+
+    if body[0] != ord("e"):
+        logger.debug(f"invalid end of dict: '{body[0]}'")
+        return None
+
+    return elements, body[1:]
+
+
 def decode(value: bytes) -> Optional[Tuple[ValueType, bytes]]:
-    decorder = [decode_int, decode_string, decode_list]
+    decorder = [decode_int, decode_string, decode_list, decode_dict]
 
     for decoder in decorder:
         decoded_value = decoder(value[:])
