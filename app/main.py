@@ -4,6 +4,8 @@ import sys
 from typing import Any, Optional, Tuple, Union
 from logging import getLevelNamesMapping, getLogger, basicConfig, WARN
 from hashlib import sha1
+from urllib.parse import urlencode
+import urllib.request
 
 log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "WARN")] or WARN
 
@@ -187,8 +189,39 @@ def encode(data: Any) -> bytes:
             raise NotImplementedError(f"Unsupported type: {type(data)}")
 
 
-def sha1_hash(data: bytes) -> str:
-    return sha1(data).hexdigest()
+def decode_torrent_file(file: str) -> dict:
+    if not os.path.exists(file):
+        raise FileNotFoundError(f"File not found: {file}")
+
+    with open(file, "rb") as f:
+        bencoded_value = f.read()
+
+    data = decode(bencoded_value)
+
+    if data is None:
+        raise ValueError("Unable to parse content")
+
+    data, _ = data
+
+    if type(data) != dict:
+        raise ValueError(f"Invalid data structured. Expected dict: '{data}', ({type(data)})")
+
+    if "announce" not in data.keys():
+        raise ValueError(f"missing announce information: {data}")
+
+    if "info" not in data.keys():
+        raise ValueError(f"missing info information: {data}")
+
+    if type(data["info"]) != dict:
+        raise ValueError(f"missing info information: {data}")
+
+    if "length" not in data["info"].keys():
+        raise ValueError(f"missing length information: {data}")
+
+    if "pieces" not in data["info"].keys():
+        raise ValueError(f"missing pieces information: {data}")
+
+    return data
 
 
 def main():
@@ -218,37 +251,7 @@ def main():
         print(json.dumps(value, default=bytes_to_str))
     elif command == "info":
         file = sys.argv[2]
-
-        if not os.path.exists(file):
-            raise FileNotFoundError(f"File not found: {file}")
-
-        with open(file, "rb") as f:
-            bencoded_value = f.read()
-
-        data = decode(bencoded_value)
-
-        if data is None:
-            raise ValueError("Unable to parse content")
-
-        data, _ = data
-
-        if type(data) != dict:
-            raise ValueError(f"Invalid data structured. Expected dict: '{data}', ({type(data)})")
-
-        if "announce" not in data.keys():
-            raise ValueError(f"missing announce information: {data}")
-
-        if "info" not in data.keys():
-            raise ValueError(f"missing info information: {data}")
-
-        if type(data["info"]) != dict:
-            raise ValueError(f"missing info information: {data}")
-
-        if "length" not in data["info"].keys():
-            raise ValueError(f"missing length information: {data}")
-
-        if "pieces" not in data["info"].keys():
-            raise ValueError(f"missing pieces information: {data}")
+        data = decode_torrent_file(file)
 
         announce = data["announce"]
         length = data["info"]["length"]
@@ -260,7 +263,7 @@ def main():
 
         print(f"Tracker URL: {announce.decode()}")
         print(f"Length: {length}")
-        print(f"Info Hash: {sha1_hash(encode(info))}")
+        print(f"Info Hash: {sha1(encode(info)).hexdigest()}")
         print(f"Piece Length: {info['piece length']}")
 
         print("Piece Hashes:")
@@ -268,6 +271,52 @@ def main():
             piece, pieces = pieces[:20], pieces[20:]
             print(piece.hex())
 
+    elif command == "peers":
+        file = sys.argv[2]
+        data = decode_torrent_file(file)
+
+        tracker_url = data["announce"]
+        info = data["info"]
+        length = info["length"]
+        info_hash = sha1(encode(info)).digest()
+
+        params = {
+            "info_hash": info_hash,
+            "peer_id": "Jt9NvNvMwR9umLtQUBwj",
+            "port": 6881,
+            "uploaded": 0,
+            "downloaded": 0,
+            "left": length,
+            "compact": 1,
+        }
+
+        query = urlencode(params)
+        url = f"{tracker_url.decode()}?{query}"
+        with urllib.request.urlopen(url) as resp:
+            piece_data = resp.read()
+
+        resp = decode(piece_data)
+        if resp is None:
+            raise ValueError("Invalid response from tracker")
+
+        resp, _ = resp
+        if not isinstance(resp, dict):
+            raise ValueError("Invalid response from tracker")
+
+        if "peers" not in resp.keys():
+            raise ValueError("Invalid response from tracker")
+
+        peers = resp["peers"]
+
+        if not isinstance(peers, bytes):
+            raise ValueError("Invalid response from tracker")
+
+        while len(peers) > 0:
+            ip = ".".join([str(x) for x in peers[:4]])
+            port = int.from_bytes(peers[4:6], "big")
+            peers = peers[6:]
+
+            print(f"{ip}:{port}")
         
     else:
         raise NotImplementedError(f"Unknown command {command}")
