@@ -247,14 +247,28 @@ def main():
         if "length" not in data["info"].keys():
             raise ValueError(f"missing length information: {data}")
 
+        if "pieces" not in data["info"].keys():
+            raise ValueError(f"missing pieces information: {data}")
+
         announce = data["announce"]
         length = data["info"]["length"]
+        info = data["info"]
+        pieces = info["pieces"]
 
         assert type(announce) == bytes
+        assert type(pieces) == bytes
 
         print(f"Tracker URL: {announce.decode()}")
         print(f"Length: {length}")
-        print(f"Info Hash: {sha1_hash(encode(data['info']))}")
+        print(f"Info Hash: {sha1_hash(encode(info))}")
+        print(f"Piece Length: {info['piece length']}")
+
+        print("Piece Hashes:")
+        while len(pieces) > 0:
+            piece, pieces = pieces[:20], pieces[20:]
+            print(piece.hex())
+
+        
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
