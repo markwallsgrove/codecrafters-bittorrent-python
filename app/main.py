@@ -20,7 +20,7 @@ logger = getLogger(__name__)
 # - decode_bencode(b"5:hello") -> b"hello"
 # - decode_bencode(b"10:hello12345") -> b"hello12345"
 
-ValueType = Union[int, str, list["ValueType"], dict["ValueType", "ValueType"]]
+ValueType = Union[int, bytes, list["ValueType"], dict[str, "ValueType"]]
 
 
 def decode_int(value: bytes) -> Optional[Tuple[int, bytes]]:
@@ -29,10 +29,7 @@ def decode_int(value: bytes) -> Optional[Tuple[int, bytes]]:
 
     header, body = value[0], value[1:]
     if header != ord("i"):
-        logger.debug(f"invalid integer header: '{header}'")
         return None
-
-    logger.debug(f"body: '{body}', header: '{header}'")
 
     numeric = bytes()
     while len(body) > 0 and body[0] != ord("e"):
@@ -40,53 +37,52 @@ def decode_int(value: bytes) -> Optional[Tuple[int, bytes]]:
         body = body[1:]
 
     if len(body) == 0:
-        logger.debug(f"no end of integer found: '{numeric}'")
+        logger.error(f"no end of integer found: '{numeric}'")
         return None
 
     end, the_rest = body[0], body[1:]
     if end != ord("e"):
-        logger.debug(f"invalid end of integer: '{end}'")
+        logger.error(f"invalid end of integer: '{end}'")
         return None
 
     try:
         return int(numeric), the_rest
     except ValueError:
-        logger.debug(f"invalid integer value: '{numeric}'")
+        logger.error(f"invalid integer value: '{numeric}'")
         return None
 
 
-def decode_string(value: bytes) -> Optional[Tuple[str, bytes]]:
+def decode_string(value: bytes) -> Optional[Tuple[bytes, bytes]]:
     str_len = bytes()
 
     while len(value) > 0 and value[0] != ord(":"):
-        logger.debug(f"string length: '{str_len}', value: '{value[0:1]}'")
         str_len = b"".join([str_len, value[0:1]])
-        logger.debug(f"string length after append: '{str_len}'")
         value = value[1:]
 
+        if str_len.isdigit() is False:
+            return None
+
     if len(value) == 0 or value[0] != ord(":"):
-        logger.debug(f"no colon found: '{value}'")
+        logger.error(f"no colon found: '{value}'")
         return None
 
     try:
-        logger.debug(f"string length: '{str_len}'")
         length = int(str_len.decode())
     except ValueError:
-        logger.debug(f"invalid string length: '{str_len}'")
+        logger.error(f"invalid string length: '{str_len}'")
         return None
 
-    logger.debug(f"string length: '{length}', {type(length)}, {length + 1}")
-
     if length + 1 > len(value):
-        logger.debug(f"string length too long: '{length + 1} {type(length)}' >  '{len(value)}'")
+        logger.error(f"string length too long: '{length + 1} {type(length)}' >  '{len(value)}'")
         return None
 
     try:
-        string = value[1:length + 1].decode() 
+        string = value[1:length + 1]
+        #.decode(encoding="mac_roman") 
         the_rest = value[length + 1:]
         return string, the_rest 
     except UnicodeDecodeError:
-        logger.debug(f"invalid string value: '{value[1:length + 1]}'")
+        logger.error(f"invalid string encoding: '{value[1:length + 1]}'")
         return None
 
 
@@ -94,30 +90,29 @@ def decode_list(value: bytes) -> Optional[Tuple[list[ValueType], bytes]]:
     header, body = value[0], value[1:]
 
     if header != ord("l"):
-        logger.debug(f"invalid list header: '{header}'")
         return None
 
-    logger.debug("found a list, decoding")
-    
     elements = []
 
     while len(body) > 0 and not body[0] == ord("e"):
         decoded_value = decode(body)
         if decoded_value is None:
+            logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
 
         element, body = decoded_value
         if element is None:
+            logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
 
         elements.append(element)
 
     if len(body) == 0:
-        logger.debug(f"invalid end of list: '{body}'")
+        logger.error(f"invalid end of list: '{body}'")
         return None
 
     if body[0] != ord("e"):
-        logger.debug(f"invalid end of list: '{body[0]}'")
+        logger.error(f"invalid end of list: '{body[0]}'")
         return None
 
     return elements, body[1:]
@@ -125,35 +120,38 @@ def decode_list(value: bytes) -> Optional[Tuple[list[ValueType], bytes]]:
 
 def decode_dict(value: bytes) -> Optional[Tuple[dict[ValueType, ValueType], bytes]]:
     header, body = value[0], value[1:]
-
-    # d3:foo3:bar5:helloi52ee
     if header != ord("d"):
-        logger.debug(f"invalid dict header: '{header}'")
         return None
-
-    logger.debug("found a dict, decoding")
 
     elements = {}
 
     while len(body) > 0 and not body[0] == ord("e"):
         key_value = decode(body)
         if key_value is None:
+            logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
         k, body = key_value
 
+        if type(k) != bytes:
+            logger.error(f"Invalid key type: '{k}'")
+            raise ValueError("Invalid key type")
+
+        k = k.decode()
+
         value_value = decode(body)
         if value_value is None:
+            logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
         v, body = value_value
 
         elements[k] = v
 
     if len(body) == 0:
-        logger.debug(f"invalid end of dict: '{body}'")
+        logger.error(f"invalid end of dict: '{body}'")
         return None
 
     if body[0] != ord("e"):
-        logger.debug(f"invalid end of dict: '{body[0]}'")
+        logger.error(f"invalid end of dict: '{body[0]}'")
         return None
 
     return elements, body[1:]
@@ -197,6 +195,44 @@ def main():
             raise ValueError("Invalid encoded value")
 
         print(json.dumps(value, default=bytes_to_str))
+    elif command == "info":
+        file = sys.argv[2]
+
+        if not os.path.exists(file):
+            raise FileNotFoundError(f"File not found: {file}")
+
+        with open(file, "rb") as f:
+            bencoded_value = f.read()
+
+        data = decode(bencoded_value)
+
+        if data is None:
+            raise ValueError("Unable to parse content")
+
+        data, _ = data
+
+        if type(data) != dict:
+            raise ValueError(f"Invalid data structured. Expected dict: '{data}', ({type(data)})")
+
+        if "announce" not in data.keys():
+            raise ValueError(f"missing announce information: {data}")
+
+        if "info" not in data.keys():
+            raise ValueError(f"missing info information: {data}")
+
+        if type(data["info"]) != dict:
+            raise ValueError(f"missing info information: {data}")
+
+        if "length" not in data["info"].keys():
+            raise ValueError(f"missing length information: {data}")
+
+        announce = data["announce"]
+        length = data["info"]["length"]
+
+        assert type(announce) == bytes
+
+        print(f"Tracker URL: {announce.decode()}")
+        print(f"Length: {length}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
