@@ -1,8 +1,9 @@
 import json
 import os
 import sys
-from typing import Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 from logging import getLevelNamesMapping, getLogger, basicConfig, WARN
+from hashlib import sha1
 
 log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "WARN")] or WARN
 
@@ -170,6 +171,26 @@ def decode(value: bytes) -> Optional[Tuple[ValueType, bytes]]:
     raise ValueError(f"failed to decode value: '{value}'")
 
 
+def encode(data: Any) -> bytes:
+    match data:
+        case int():
+            return f"i{data}e".encode()
+        case bytes():
+            return f"{len(data)}:".encode() + data
+        case str():
+            return f"{len(data)}:{data}".encode()
+        case list():
+            return b"l" + b"".join([ encode(y) for y in data ]) + b"e"
+        case dict():
+            return b"d" + b"".join([encode(k) + encode(y) for k, y in data.items()])  + b"e"
+        case _:
+            raise NotImplementedError(f"Unsupported type: {type(data)}")
+
+
+def sha1_hash(data: bytes) -> str:
+    return sha1(data).hexdigest()
+
+
 def main():
     command = sys.argv[1]
 
@@ -233,6 +254,7 @@ def main():
 
         print(f"Tracker URL: {announce.decode()}")
         print(f"Length: {length}")
+        print(f"Info Hash: {sha1_hash(encode(data['info']))}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
