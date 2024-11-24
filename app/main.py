@@ -6,6 +6,7 @@ from logging import getLevelNamesMapping, getLogger, basicConfig, WARN
 from hashlib import sha1
 from urllib.parse import urlencode
 import urllib.request
+import socket
 
 log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "WARN")] or WARN
 
@@ -317,6 +318,27 @@ def main():
             peers = peers[6:]
 
             print(f"{ip}:{port}")
+
+    elif command == "handshake":
+        file = sys.argv[2]
+        conn_str = sys.argv[3]
+
+        data = decode_torrent_file(file)
+        info = data["info"]
+        info_hash = sha1(encode(info)).digest()
+        peer_id = "Jt9NvNvMwR9umLtQUBwj".encode()
+
+        handshake = b"\x13BitTorrent protocol\x00\x00\x00\x00\x00\x00\x00\x00" + info_hash + peer_id
+
+        host, port = conn_str.split(":")
+        port = int(port)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((host, port))
+            s.send(handshake)
+            resp = s.recv(1024)
+
+        print("Peer ID:", resp[-20:].hex())
         
     else:
         raise NotImplementedError(f"Unknown command {command}")
