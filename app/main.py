@@ -826,8 +826,6 @@ async def handle_tracker(
 
                     await write_piece(message.index, message.block)
 
-                    # TODO: await tracker.send_message(Have(5, 4, b"", message.index))
-
                     logger.debug(f"status: downloading={pieces_downloading}")
                 case None:
                     pass
@@ -979,6 +977,9 @@ async def main():
             chunk_lock = asyncio.Lock()
 
             async def verify_piece(piece_index: int) -> bool:
+                if piece_index < 0 or piece_index >= len(pieces):
+                    raise ValueError(f"Invalid piece index: {piece_index}, {len(pieces)}")
+        
                 piece = pieces[piece_index]
 
                 async with file_lock:
