@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 import json
+import math
 import os
-from typing import Any, Optional, Tuple, Union
-from logging import getLevelNamesMapping, getLogger, basicConfig, WARN
+from typing import Any, Awaitable, Callable, Optional, Tuple, Union
+from logging import Logger, getLevelNamesMapping, getLogger, basicConfig, WARN
 from hashlib import sha1
 from urllib.parse import urlencode
 import urllib.request
@@ -12,13 +13,13 @@ import asyncio
 import random
 import string
 
-log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "WARN")] or WARN
+log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "DEBUG")] or WARN
 
 basicConfig(
     level=log_level,
-    format="[%(filename)s:%(lineno)s - %(funcName)s()] %(message)s",
+    format="%(name)s: [%(filename)s:%(lineno)s, %(funcName)s()] %(message)s",
 )
-logger = getLogger(__name__)
+global_logger = getLogger(__name__)
 
 
 ValueType = Union[int, bytes, list["ValueType"], dict[str, "ValueType"]]
@@ -208,6 +209,7 @@ class Request(PeerMesage):
 
         return encode_integer(len(payload)) + payload
 
+
 @dataclass
 class Piece(PeerMesage):
     index: int
@@ -217,9 +219,9 @@ class Piece(PeerMesage):
     @classmethod
     def from_bytes(cls, data: bytes) -> "Piece":
         length = parse_integer(data[0:4])
-        id = parse_integer(data[4:5])
-        index = parse_integer(data[5:9])
-        begin = parse_integer(data[9:13])
+        id = parse_integer(data[4:5]) # 1 byte
+        index = parse_integer(data[5:9]) # 4 bytes
+        begin = parse_integer(data[9:13]) # 4 bytes
         block = data[13:]
 
         return cls(
@@ -238,6 +240,16 @@ class Piece(PeerMesage):
             + self.block
 
         return encode_integer(len(payload)) + payload
+
+    def __str__(self) -> str:
+        return f"Piece(" + \
+            f"index={self.index}, " + \
+            f"begin={self.begin}, " + \
+            f"block=<truncated>, " + \
+            f"message_id={self.message_id}, " + \
+            f"message_length={self.message_length}, " + \
+            f"block_length={len(self.block)}" + \
+       ")"
 
 
 @dataclass
@@ -284,6 +296,7 @@ class Bitfield(PeerMesage):
         payload = encode_id(self.message_id) + self.bitfield
         return encode_integer(len(payload)) + payload
 
+
 def decode_peer_message(data: bytes) -> Optional[PeerMesage]:
     id = parse_integer(data[4:5])
 
@@ -320,18 +333,18 @@ def decode_int(value: bytes) -> Optional[Tuple[int, bytes]]:
         body = body[1:]
 
     if len(body) == 0:
-        logger.error(f"no end of integer found: '{numeric}'")
+        global_logger.error(f"no end of integer found: '{numeric}'")
         return None
 
     end, the_rest = body[0], body[1:]
     if end != ord("e"):
-        logger.error(f"invalid end of integer: '{end}'")
+        global_logger.error(f"invalid end of integer: '{end}'")
         return None
 
     try:
         return int(numeric), the_rest
     except ValueError:
-        logger.error(f"invalid integer value: '{numeric}'")
+        global_logger.error(f"invalid integer value: '{numeric}'")
         return None
 
 
@@ -346,17 +359,17 @@ def decode_string(value: bytes) -> Optional[Tuple[bytes, bytes]]:
             return None
 
     if len(value) == 0 or value[0] != ord(":"):
-        logger.error(f"no colon found: '{value}'")
+        global_logger.error(f"no colon found: '{value}'")
         return None
 
     try:
         length = int(str_len.decode())
     except ValueError:
-        logger.error(f"invalid string length: '{str_len}'")
+        global_logger.error(f"invalid string length: '{str_len}'")
         return None
 
     if length + 1 > len(value):
-        logger.error(f"string length too long: '{length + 1} {type(length)}' >  '{len(value)}'")
+        global_logger.error(f"string length too long: '{length + 1} {type(length)}' >  '{len(value)}'")
         return None
 
     try:
@@ -364,7 +377,7 @@ def decode_string(value: bytes) -> Optional[Tuple[bytes, bytes]]:
         the_rest = value[length + 1:]
         return string, the_rest 
     except UnicodeDecodeError:
-        logger.error(f"invalid string encoding: '{value[1:length + 1]}'")
+        global_logger.error(f"invalid string encoding: '{value[1:length + 1]}'")
         return None
 
 
@@ -379,22 +392,22 @@ def decode_list(value: bytes) -> Optional[Tuple[list[ValueType], bytes]]:
     while len(body) > 0 and not body[0] == ord("e"):
         decoded_value = decode(body)
         if decoded_value is None:
-            logger.error(f"Invalid encoded value: '{body}'")
+            global_logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
 
         element, body = decoded_value
         if element is None:
-            logger.error(f"Invalid encoded value: '{body}'")
+            global_logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
 
         elements.append(element)
 
     if len(body) == 0:
-        logger.error(f"invalid end of list: '{body}'")
+        global_logger.error(f"invalid end of list: '{body}'")
         return None
 
     if body[0] != ord("e"):
-        logger.error(f"invalid end of list: '{body[0]}'")
+        global_logger.error(f"invalid end of list: '{body[0]}'")
         return None
 
     return elements, body[1:]
@@ -410,30 +423,30 @@ def decode_dict(value: bytes) -> Optional[Tuple[dict[ValueType, ValueType], byte
     while len(body) > 0 and not body[0] == ord("e"):
         key_value = decode(body)
         if key_value is None:
-            logger.error(f"Invalid encoded value: '{body}'")
+            global_logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
         k, body = key_value
 
         if type(k) != bytes:
-            logger.error(f"Invalid key type: '{k}'")
+            global_logger.error(f"Invalid key type: '{k}'")
             raise ValueError("Invalid key type")
 
         k = k.decode()
 
         value_value = decode(body)
         if value_value is None:
-            logger.error(f"Invalid encoded value: '{body}'")
+            global_logger.error(f"Invalid encoded value: '{body}'")
             raise ValueError("Invalid encoded value")
         v, body = value_value
 
         elements[k] = v
 
     if len(body) == 0:
-        logger.error(f"invalid end of dict: '{body}'")
+        global_logger.error(f"invalid end of dict: '{body}'")
         return None
 
     if body[0] != ord("e"):
-        logger.error(f"invalid end of dict: '{body[0]}'")
+        global_logger.error(f"invalid end of dict: '{body[0]}'")
         return None
 
     return elements, body[1:]
@@ -530,12 +543,47 @@ def encode_id(id: int) -> bytes:
     return id.to_bytes(1, "big")
 
 
+@dataclass
+class ChunkMeta(object):
+    piece_index: int
+    index: int
+    begin: int
+    length: int
+
+
+@dataclass
+class PieceMeta(object):
+    index: int
+    hash: bytes
+    length: int
+    pipeline_size: int
+
+    def pipeline_chunks(self) -> list[ChunkMeta]:
+        amount_of_pieces = math.ceil(self.length / self.pipeline_size)
+        last_piece_size = self.length % self.pipeline_size or self.pipeline_size
+
+        global_logger.debug(f"Pipeline size: {self.pipeline_size}, amount of pieces: {amount_of_pieces}, last piece size: {last_piece_size}")
+
+        return [
+            ChunkMeta(
+                piece_index=self.index,
+                index=x,
+                begin=x * self.pipeline_size,
+                length=self.pipeline_size if x != amount_of_pieces - 1 or last_piece_size == 0 else last_piece_size,
+            )
+            for x
+            in range(amount_of_pieces)
+        ]
+
+
 class Tracker(object):
     _reader: asyncio.StreamReader
     _writer: asyncio.StreamWriter
     _conn: tuple[str, int]
+    _logger: Logger
 
     def __init__(self, conn: tuple[str, int]) -> None:
+        self._logger = getLogger(f"peer {conn[0]}:{conn[1]}")
         self._conn = conn
 
     async def _connect(self, conn: tuple[str, int]) -> None:
@@ -561,25 +609,40 @@ class Tracker(object):
         return TrackerPeersResponse.from_bytes(await self._reader.read(68))
 
     async def listen_for_messages(self) -> Optional[PeerMesage]:
-        message_length_bytes = await self._reader.read(4)
+        try:
+            message_length_bytes = await self._reader.readexactly(4)
+        except asyncio.IncompleteReadError:
+            return None
+
         if len(message_length_bytes) == 0:
             return None
 
         # TODO: sanity check message length
         message_length = parse_integer(message_length_bytes)
         if message_length == 0:
-            logger.error(f"Invalid message length: {message_length_bytes}")
+            # keep alive, ignore
+            self._logger.debug("Keep alive message")
             return None
 
-        return decode_peer_message(
-            message_length_bytes + await self._reader.read(message_length)
-        )
+        payload = await self._reader.readexactly(message_length)
+        assert len(payload) == message_length, f"Invalid message length: {len(payload)} != {message_length}"
+        return decode_peer_message(message_length_bytes + payload)
 
     async def send_message(self, message: PeerMesage) -> None:
-        print("Sending message:", message, message.encode())
         self._writer.write(message.encode())
         await self._writer.drain()
 
+    async def start_piece_downloads(self, piece_index: int, piece_begin: int, piece_length: int) -> Optional[int]:
+        await self.send_message(Request(
+            13,
+            6,
+            b"",
+            piece_index,
+            piece_begin,
+            piece_length,
+        ))
+
+        return piece_index
 
     async def __aenter__(self):
         await self._connect(self._conn)
@@ -590,7 +653,7 @@ class Tracker(object):
             self._writer.close()
             await self._writer.wait_closed()
         except Exception:
-            logger.exception("Failed to close connection")
+            self._logger.exception("Failed to close connection")
 
 
 def generate_peer_id() -> bytes:
@@ -686,6 +749,7 @@ def query_tracker(torrent_data: dict[str, ValueType]) -> dict[str, ValueType]:
 
 def get_peers(tracker_data: dict[str, ValueType]) -> list[Peer]:
     if "peers" not in tracker_data.keys():
+        global_logger.debug(tracker_data)
         raise ValueError("Invalid response from tracker")
 
     if not isinstance(tracker_data["peers"], bytes):
@@ -713,6 +777,80 @@ def parse_connection_string(connection: str) -> Tuple[str, int]:
     return host, port
 
 
+def pieces_hashes(pieces: bytes) -> list[bytes]:
+    return [
+        pieces[x : x + 20]
+        for x
+        in range(0, len(pieces), 20)
+    ]
+
+
+async def handle_tracker(
+    peer: Peer,
+    file: str,
+    write_piece: Callable[[int, bytes], Awaitable[None]],
+    get_chunk_to_download: Callable[[bytes], Awaitable[Optional[ChunkMeta]]],
+    has_more_chunks_to_download: Callable[[bytes], Awaitable[bool]],
+) -> None:
+    async with Tracker((peer.ip, peer.port)) as tracker:
+        logger = getLogger(f"peer {peer.ip}:{peer.port}")
+
+        # TODO: handle response
+        await tracker_handshake(file, tracker)
+        pieces_downloading: dict[str, ChunkMeta] = {}
+        available_pieces = bytes()
+        unchoked = False
+
+        while True:
+            message = await tracker.listen_for_messages()
+
+            match message:
+                case Bitfield():
+                    available_pieces = message.bitfield
+                    logger.debug(f"Bitfield: {available_pieces}, {message.bitfield}")
+                    logger.debug("Interested")
+                    # TODO: check if there are pieces that are of interest
+                    await tracker.send_message(Interested(1, 2, b""))
+                case Unchoke():
+                    unchoked = True
+                    logger.debug("Unchoked")
+                case Piece():
+                    logger.debug(f"Piece: {message}")
+
+                    chunk_id = f"{message.index}_{message.begin}"
+                    if chunk_id not in pieces_downloading:
+                        logger.error(f"Invalid chunk index: {chunk_id}")
+                        raise ValueError("Invalid chunk index")
+
+                    pieces_downloading.pop(f"{message.index}_{message.begin}")
+
+                    await write_piece(message.index, message.block)
+
+                    # TODO: await tracker.send_message(Have(5, 4, b"", message.index))
+
+                    logger.debug(f"status: downloading={pieces_downloading}")
+                case None:
+                    pass
+                case _:
+                    logger.debug(f"Unknown message: {message}")
+
+            if unchoked and len(pieces_downloading) == 0 and await has_more_chunks_to_download(available_pieces):
+                while len(pieces_downloading) < 5:
+                    chunk = await get_chunk_to_download(available_pieces)
+                    if chunk is None:
+                        break
+
+                    logger.debug(f"Downloading piece={chunk.piece_index}, begin={chunk.begin}, length={chunk.length}")
+                    await tracker.start_piece_downloads(chunk.piece_index, chunk.begin, chunk.length)
+                    pieces_downloading[f"{chunk.piece_index}_{chunk.begin}"] = chunk
+
+                logger.debug(f"status: downloading={pieces_downloading}")
+
+            if not await has_more_chunks_to_download(available_pieces) and len(pieces_downloading) == 0:
+                logger.info("download complete")
+                return
+
+
 async def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
@@ -733,7 +871,7 @@ async def main():
     download_piece_cmd = subparsers.add_parser("download_piece")
     download_piece_cmd.add_argument("-o", help="file to save the piece to", default="-")
     download_piece_cmd.add_argument("file", help="Torrent file to parse")
-    download_piece_cmd.add_argument("piece", help="Piece index to download")
+    download_piece_cmd.add_argument("piece", help="Piece index to download", default="-1")
 
     args = parser.parse_args()
 
@@ -763,7 +901,7 @@ async def main():
             data = decode_torrent_file(args.file)
             torrent_url = get_torrent_url(data)
             length = get_length(data)
-            pieces = get_pieces(data)
+            hashes = pieces_hashes(get_pieces(data))
             pieces_length = get_pieces_length(data)
             info_hash = generate_info_hash(data)
 
@@ -773,9 +911,8 @@ async def main():
             print(f"Piece Length: {pieces_length}")
 
             print("Piece Hashes:")
-            while len(pieces) > 0:
-                piece, pieces = pieces[:20], pieces[20:]
-                print(piece.hex())
+            for hash in hashes:
+                print(hash.hex())
 
         case "peers":
             torrent_data = decode_torrent_file(args.file)
@@ -800,59 +937,112 @@ async def main():
             torrent_url = get_torrent_url(torrent_data)
             tracker_data = query_tracker(torrent_data)
             file_length = get_length(torrent_data)
-            pieces_length = get_pieces_length(torrent_data)
-            last_piece_size = file_length % pieces_length
-            last_piece_index = file_length // pieces_length
+            hashes = pieces_hashes(get_pieces(torrent_data))
 
-            print("File length:", file_length)
-            print("Pieces length:", pieces_length)
-            print("Last piece size:", last_piece_size)
-            print("Last piece index:", last_piece_index)
+            pieces_length = get_pieces_length(torrent_data)
+            amount_of_pieces = math.ceil(file_length / pieces_length)
+            last_piece_size = file_length % pieces_length
+            last_piece_index = amount_of_pieces - 1
+
+            assert len(hashes) == amount_of_pieces, "Invalid amount of pieces"
+
+            pieces = [
+                PieceMeta(
+                    index=x,
+                    hash=hashes[x],
+                    length=last_piece_size if x == last_piece_index else pieces_length,
+                    pipeline_size=16 * 1024,
+                )
+                for x in range(amount_of_pieces)
+                if x == piece_index or piece_index < 0
+            ]
+
+            chunks = [
+                chunk
+                for piece in pieces
+                for chunk in piece.pipeline_chunks()
+            ]
+
+            global_logger.debug(f"Pieces: {pieces}")
+            global_logger.debug(f"File length: {file_length}")
+            global_logger.debug(f"Pieces length: {pieces_length}")
+            global_logger.debug(f"Last piece size: {last_piece_size}")
+            global_logger.debug(f"Last piece index: {last_piece_index}")
+            global_logger.debug(f"Amount of pieces: {amount_of_pieces}")
+            global_logger.debug(f"Amount of chunks: {len(chunks)}")
 
             peers = get_peers(tracker_data)
             # TODO: cleanup
             assert len(peers) > 0, "No peers found"
-            peer = peers[0]
 
-            async with Tracker((peer.ip, peer.port)) as tracker:
-                resp = await tracker_handshake(args.file, tracker)
+            file_lock = asyncio.Lock()
+            chunk_lock = asyncio.Lock()
 
-                while True:
-                    message = await tracker.listen_for_messages()
-                    if message is None:
-                        continue
+            async def verify_piece(piece_index: int) -> bool:
+                piece = pieces[piece_index]
 
-                    print("Message:\n", message)
-                    if isinstance(message, Bitfield):
-                        await tracker.send_message(Interested(1, 2, b""))
+                async with file_lock:
+                    with open(output_file, "rb") as f:
+                        f.seek(piece_index * pieces_length)
+                        piece_hash = sha1(f.read(piece.length)).digest()
+                        return piece_hash == piece.hash
 
-                    elif isinstance(message, Unchoke):
-                        piece_block_size = pieces_length
-                        if piece_index == last_piece_index:
-                            piece_block_size = last_piece_size
-                        
-                        await tracker.send_message(Request(
-                            13,
-                            6,
-                            b"",
-                            piece_index,
-                            piece_index * pieces_length,
-                            piece_block_size,
-                        ))
+            async def get_chunk_to_download(available_pieces: bytes) -> Optional[ChunkMeta]:
+                async with chunk_lock:
+                    if len(chunks) == 0:
+                        return None
 
-                    elif isinstance(message, Piece):
-                        # TODO: validate sha1 hash of piece
-                        print("Piece received")
+                    return chunks.pop(0)
 
-                        if output_file == "-":
-                            print(message.block)
-                        else:
-                            with open(output_file, "ab") as f:
-                                f.seek(piece_index * pieces_length)
-                                f.write(message.block)
-                                f.flush()
+            async def has_more_chunks_to_download(available_pieces: bytes) -> bool:
+                async with chunk_lock:
+                    return len(chunks) > 0
 
-                        break
+            async def is_piece_complete(piece_index: int) -> bool:
+                async with chunk_lock:
+                    for chunk in chunks:
+                        if chunk.piece_index == piece_index:
+                            return False
+
+                    return True
+
+            async def invalid_piece(piece_index: int) -> None:
+                piece = pieces[piece_index]
+
+                async with chunk_lock:
+                    chunks.extend(piece.pipeline_chunks())
+
+                global_logger.error(f"Invalid piece: {piece_index}. Re-adding chunks to download queue")
+
+            async def write_piece(piece_index: int, block: bytes) -> None:
+                async with file_lock:
+                    with open(output_file, "ab") as f:
+                        f.seek(piece_index * pieces_length)
+                        f.write(block)
+                        f.flush()
+
+                if await is_piece_complete(piece_index):
+                    verified = await verify_piece(piece_index)
+
+                    if not verified:
+                        await invalid_piece(piece_index)
+                    else:
+                        global_logger.debug(f"Piece downloaded: {piece_index}")
+
+            tasks: set[asyncio.Task] = set()
+            for peer in peers:
+                tasks.add(asyncio.create_task(handle_tracker(
+                    peer,
+                    args.file,
+                    write_piece,
+                    get_chunk_to_download,
+                    has_more_chunks_to_download,
+                )))
+
+                # TODO: disabling multiple peer usage for now
+                # break
+
+            await asyncio.gather(*tasks)
 
         case _:
             parser.print_help()
