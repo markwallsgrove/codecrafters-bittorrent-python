@@ -944,8 +944,8 @@ async def main():
 
             assert len(hashes) == amount_of_pieces, "Invalid amount of pieces"
 
-            pieces = [
-                PieceMeta(
+            pieces = {
+                x: PieceMeta(
                     index=x,
                     hash=hashes[x],
                     length=last_piece_size if x == last_piece_index else pieces_length,
@@ -953,11 +953,11 @@ async def main():
                 )
                 for x in range(amount_of_pieces)
                 if x == piece_index or piece_index < 0
-            ]
+            }
 
             chunks = [
                 chunk
-                for piece in pieces
+                for piece in pieces.values()
                 for chunk in piece.pipeline_chunks()
             ]
 
