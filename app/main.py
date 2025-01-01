@@ -17,7 +17,7 @@ log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "DEBUG")] or WARN
 
 basicConfig(
     level=log_level,
-    format="%(name)s: [%(filename)s:%(lineno)s, %(funcName)s()] %(message)s",
+    format="%(name)s[%(filename)s:%(lineno)s %(funcName)s()]: %(message)s",
 )
 global_logger = getLogger(__name__)
 
@@ -583,7 +583,7 @@ class Tracker(object):
     _logger: Logger
 
     def __init__(self, conn: tuple[str, int]) -> None:
-        self._logger = getLogger(f"peer {conn[0]}:{conn[1]}")
+        self._logger = getLogger(f"peer@{conn[0]}:{conn[1]}")
         self._conn = conn
 
     async def _connect(self, conn: tuple[str, int]) -> None:
