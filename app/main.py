@@ -977,8 +977,8 @@ async def main():
             chunk_lock = asyncio.Lock()
 
             async def verify_piece(piece_index: int) -> bool:
-                if piece_index < 0 or piece_index >= len(pieces):
-                    raise ValueError(f"Invalid piece index: {piece_index}, {len(pieces)}")
+                if piece_index not in pieces.keys():
+                    raise ValueError(f"Invalid piece index: {piece_index}, {pieces}")
         
                 piece = pieces[piece_index]
 
