@@ -788,16 +788,17 @@ def pieces_hashes(pieces: bytes) -> list[bytes]:
 async def handle_tracker(
     peer: Peer,
     file: str,
-    write_piece: Callable[[int, bytes], Awaitable[None]],
-    get_chunk_to_download: Callable[[bytes], Awaitable[Optional[ChunkMeta]]],
+    write_chunk: Callable[[int, int, bytes], Awaitable[None]],
+    get_chunks_to_download: Callable[[bytes], Awaitable[Optional[list[ChunkMeta]]]],
     has_more_chunks_to_download: Callable[[bytes], Awaitable[bool]],
+    verify_piece: Callable[[int], Awaitable[bool]],
 ) -> None:
     async with Tracker((peer.ip, peer.port)) as tracker:
         logger = getLogger(f"peer {peer.ip}:{peer.port}")
 
         # TODO: handle response
         await tracker_handshake(file, tracker)
-        pieces_downloading: dict[str, ChunkMeta] = {}
+        chunks_downloading: dict[str, ChunkMeta] = {}
         available_pieces = bytes()
         unchoked = False
 
@@ -818,33 +819,37 @@ async def handle_tracker(
                     logger.debug(f"Piece: {message}")
 
                     chunk_id = f"{message.index}_{message.begin}"
-                    if chunk_id not in pieces_downloading:
+                    if chunk_id not in chunks_downloading:
                         logger.error(f"Invalid chunk index: {chunk_id}")
                         raise ValueError("Invalid chunk index")
 
-                    pieces_downloading.pop(f"{message.index}_{message.begin}")
+                    chunks_downloading.pop(f"{message.index}_{message.begin}")
 
-                    await write_piece(message.index, message.block)
+                    await write_chunk(message.index, message.begin, message.block)
 
-                    logger.debug(f"status: downloading={pieces_downloading}")
+                    logger.debug(f"status: downloading={chunks_downloading}")
+                    if len(chunks_downloading) == 0:
+                        await verify_piece(message.index)
                 case None:
                     pass
                 case _:
                     logger.debug(f"Unknown message: {message}")
 
-            if unchoked and len(pieces_downloading) == 0 and await has_more_chunks_to_download(available_pieces):
-                while len(pieces_downloading) < 5:
-                    chunk = await get_chunk_to_download(available_pieces)
-                    if chunk is None:
+            if unchoked and len(chunks_downloading) == 0 and await has_more_chunks_to_download(available_pieces):
+                while len(chunks_downloading) < 5:
+                    chunks = await get_chunks_to_download(available_pieces)
+                    if chunks is None:
                         break
 
-                    logger.debug(f"Downloading piece={chunk.piece_index}, begin={chunk.begin}, length={chunk.length}")
-                    await tracker.start_piece_downloads(chunk.piece_index, chunk.begin, chunk.length)
-                    pieces_downloading[f"{chunk.piece_index}_{chunk.begin}"] = chunk
+                    # TODO: should be limited to five 💀
+                    for chunk in chunks:
+                        logger.debug(f"Downloading piece={chunk.piece_index}, begin={chunk.begin}, length={chunk.length}")
+                        await tracker.start_piece_downloads(chunk.piece_index, chunk.begin, chunk.length)
+                        chunks_downloading[f"{chunk.piece_index}_{chunk.begin}"] = chunk
 
-                logger.debug(f"status: downloading={pieces_downloading}")
+                logger.debug(f"status: downloading={chunks_downloading}")
 
-            if not await has_more_chunks_to_download(available_pieces) and len(pieces_downloading) == 0:
+            if not await has_more_chunks_to_download(available_pieces) and len(chunks_downloading) == 0:
                 logger.info("download complete")
                 return
 
@@ -944,6 +949,10 @@ async def main():
 
             assert len(hashes) == amount_of_pieces, "Invalid amount of pieces"
 
+            # truncate file
+            with open(output_file, 'w+b') as f:
+                pass  # File is created and truncated
+
             pieces = {
                 x: PieceMeta(
                     index=x,
@@ -981,67 +990,71 @@ async def main():
                     raise ValueError(f"Invalid piece index: {piece_index}, {pieces}")
         
                 piece = pieces[piece_index]
-
                 async with file_lock:
                     with open(output_file, "rb") as f:
-                        f.seek(piece_index * pieces_length)
-                        piece_hash = sha1(f.read(piece.length)).digest()
-                        return piece_hash == piece.hash
+                        if piece_index > 0:
+                            f.seek(piece_index * pieces_length)
+                        contents = f.read(piece.length)
 
-            async def get_chunk_to_download(available_pieces: bytes) -> Optional[ChunkMeta]:
+                if sha1(contents).digest() != piece.hash:
+                    global_logger.error(f"Piece verification failed")
+                    await invalid_piece(piece_index)
+                    return False
+
+                return True
+
+            async def get_chunks_to_download(available_pieces: bytes) -> Optional[list[ChunkMeta]]:
+                nonlocal chunks 
+
                 async with chunk_lock:
                     if len(chunks) == 0:
                         return None
 
-                    return chunks.pop(0)
+                    chunks_to_download = [
+                        chunk
+                        for chunk in chunks
+                        if chunk.piece_index == chunks[0].piece_index
+                    ]
+
+                    chunks = [
+                        chunk
+                        for chunk in chunks
+                        if chunk.piece_index != chunks[0].piece_index
+                    ]
+
+                    return chunks_to_download
 
             async def has_more_chunks_to_download(available_pieces: bytes) -> bool:
                 async with chunk_lock:
                     return len(chunks) > 0
 
-            async def is_piece_complete(piece_index: int) -> bool:
-                async with chunk_lock:
-                    for chunk in chunks:
-                        if chunk.piece_index == piece_index:
-                            return False
-
-                    return True
-
             async def invalid_piece(piece_index: int) -> None:
+                global_logger.error(f"Invalid piece: {piece_index}. Re-adding chunks to download queue")
                 piece = pieces[piece_index]
 
                 async with chunk_lock:
                     chunks.extend(piece.pipeline_chunks())
 
-                global_logger.error(f"Invalid piece: {piece_index}. Re-adding chunks to download queue")
-
-            async def write_piece(piece_index: int, block: bytes) -> None:
+            async def write_chunk(piece_index: int, begin: int, block: bytes) -> None:
                 async with file_lock:
-                    with open(output_file, "ab") as f:
-                        f.seek(piece_index * pieces_length)
+                    with open(output_file, "r+b") as f:
+                        f.seek(piece_index * pieces_length + begin, os.SEEK_SET)
                         f.write(block)
                         f.flush()
-
-                if await is_piece_complete(piece_index):
-                    verified = await verify_piece(piece_index)
-
-                    if not verified:
-                        await invalid_piece(piece_index)
-                    else:
-                        global_logger.debug(f"Piece downloaded: {piece_index}")
 
             tasks: set[asyncio.Task] = set()
             for peer in peers:
                 tasks.add(asyncio.create_task(handle_tracker(
                     peer,
                     args.file,
-                    write_piece,
-                    get_chunk_to_download,
+                    write_chunk,
+                    get_chunks_to_download,
                     has_more_chunks_to_download,
+                    verify_piece,
                 )))
 
                 # TODO: disabling multiple peer usage for now
-                break
+                # break
 
             await asyncio.gather(*tasks)
 
