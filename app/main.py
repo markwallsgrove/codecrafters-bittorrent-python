@@ -1041,7 +1041,7 @@ async def main():
                 )))
 
                 # TODO: disabling multiple peer usage for now
-                # break
+                break
 
             await asyncio.gather(*tasks)
 
