@@ -947,6 +947,9 @@ async def main():
             last_piece_size = file_length % pieces_length
             last_piece_index = amount_of_pieces - 1
 
+            # shrink the file by writing the selected piece as seek 0
+            seek_offset = -abs(piece_index * pieces_length)
+
             assert len(hashes) == amount_of_pieces, "Invalid amount of pieces"
 
             # truncate file
@@ -993,7 +996,7 @@ async def main():
                 async with file_lock:
                     with open(output_file, "rb") as f:
                         if piece_index > 0:
-                            f.seek(piece_index * pieces_length)
+                            f.seek(piece_index * pieces_length + seek_offset, os.SEEK_SET)
                         contents = f.read(piece.length)
 
                 if sha1(contents).digest() != piece.hash:
@@ -1038,7 +1041,16 @@ async def main():
             async def write_chunk(piece_index: int, begin: int, block: bytes) -> None:
                 async with file_lock:
                     with open(output_file, "r+b") as f:
-                        f.seek(piece_index * pieces_length + begin, os.SEEK_SET)
+                        # f.seek(piece_index * pieces_length + begin + seek_offset, os.SEEK_SET)
+                        global_logger.debug({
+                            "piece_index": piece_index,
+                            "pieces_length": pieces_length,
+                            "begin": begin,
+                            "seek_offset": seek_offset,
+                            "length": len(block),
+                            "seek": piece_index * pieces_length + begin + seek_offset,
+                        })
+                        f.seek(piece_index * pieces_length + begin + seek_offset, os.SEEK_SET)
                         f.write(block)
                         f.flush()
 
