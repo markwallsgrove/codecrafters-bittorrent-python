@@ -5,7 +5,7 @@ import os
 from typing import Any, Awaitable, Callable, Optional, Tuple, Union
 from logging import Logger, getLevelNamesMapping, getLogger, basicConfig, WARN
 from hashlib import sha1
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs
 import urllib.request
 import argparse
 from dataclasses import dataclass
@@ -1019,6 +1019,9 @@ async def main():
     download_cmd.add_argument("-o", help="file to save the piece to", default="-")
     download_cmd.add_argument("file", help="Torrent file to parse")
 
+    magnet_parse_cmd = subparsers.add_parser("magnet_parse")
+    magnet_parse_cmd.add_argument("magnet_link", help="Magnet link to parse")
+
     args = parser.parse_args()
 
     match args.command:
@@ -1080,6 +1083,14 @@ async def main():
         case "download":
             await download_file(args.file, args.o)
 
+        case "magnet_parse":
+            if not args.magnet_link.startswith("magnet:?"):
+                raise ValueError("Invalid magnet link")
+
+            query_string = parse_qs(args.magnet_link[8:])
+            print("Tracker URL:", query_string["tr"][0])
+            print("Info Hash:", query_string["xt"][0][9:])
+    
         case _:
             parser.print_help()
         
