@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import asyncio
 import random
 import string
+import binascii
 
 log_level = getLevelNamesMapping()[os.environ.get("LOGLEVEL", "DEBUG")] or WARN
 
@@ -526,6 +527,14 @@ def get_torrent_url(torrent_data: dict[str, ValueType]) -> str:
 
 
 def generate_info_hash(torrent_data: dict[str, ValueType]) -> bytes:
+    if "info_hash" in torrent_data.keys():
+        if isinstance(torrent_data["info_hash"], bytes):
+            return torrent_data["info_hash"]
+        raise ValueError(f"invalid type for info_hash: '{type(torrent_data['info_hash'])}'")
+
+    if "info" not in torrent_data.keys():
+        raise ValueError("missing info key")
+
     info = torrent_data["info"]
     info_hash = sha1(encode(info))
     return info_hash.digest()
@@ -662,8 +671,7 @@ def generate_peer_id() -> bytes:
     return (prefix + random_part).encode("utf-8")
 
 
-async def tracker_handshake(file: str, tracker: Tracker) -> TrackerPeersResponse:
-    torrent_data = decode_torrent_file(file)
+async def tracker_handshake(torrent_data: dict[str, ValueType], tracker: Tracker) -> TrackerPeersResponse:
     info_hash = generate_info_hash(torrent_data)
     peer_id = generate_peer_id()
     return await tracker.handshake(info_hash, peer_id)
@@ -744,16 +752,18 @@ def query_tracker(torrent_data: dict[str, ValueType]) -> dict[str, ValueType]:
     if not isinstance(resp, dict):
         raise ValueError("Invalid response from tracker")
 
+    if "failure reason" in resp.keys():
+        raise ValueError(f"Failed to query tracker: {resp}")
+
     return resp
 
 
 def get_peers(tracker_data: dict[str, ValueType]) -> list[Peer]:
     if "peers" not in tracker_data.keys():
-        global_logger.debug(tracker_data)
-        raise ValueError("Invalid response from tracker")
+        raise ValueError(f"Invalid response from tracker (missing peers): {tracker_data}")
 
     if not isinstance(tracker_data["peers"], bytes):
-        raise ValueError("Invalid response from tracker")
+        raise ValueError(f"Invalid response from tracker (invalid peers). Expected bytes, got: {type(tracker_data['peers'])}")
 
     encoded_peers = tracker_data["peers"]
     peers: list[Peer] = []
@@ -797,7 +807,8 @@ async def handle_tracker(
         logger = getLogger(f"peer {peer.ip}:{peer.port}")
 
         # TODO: handle response
-        await tracker_handshake(file, tracker)
+        torrent_data = decode_torrent_file(file)
+        await tracker_handshake(torrent_data, tracker)
         chunks_downloading: dict[str, ChunkMeta] = {}
         available_pieces = bytes()
         unchoked = False
@@ -856,7 +867,6 @@ async def handle_tracker(
 
 async def download_file(torrent_file: str, output_file: str, piece_index_to_download: int = -1):
     torrent_data = decode_torrent_file(torrent_file)
-    # torrent_url = get_torrent_url(torrent_data)
     tracker_data = query_tracker(torrent_data)
     file_length = get_length(torrent_data)
     hashes = pieces_hashes(get_pieces(torrent_data))
@@ -993,6 +1003,38 @@ async def download_file(torrent_file: str, output_file: str, piece_index_to_down
     await asyncio.gather(*tasks)
 
 
+def parse_magnetic_link(magnet_link: str) -> dict[str, ValueType]:
+    if not magnet_link.startswith("magnet:?"):
+        raise ValueError("Invalid magnet link")
+
+    query_string = parse_qs(magnet_link[8:])
+
+    if "xt" not in query_string.keys():
+        raise ValueError("Invalid magnet link")
+
+    if "tr" not in query_string.keys():
+        raise ValueError("Invalid magnet link")
+
+    if len(query_string["xt"]) != 1:
+        raise ValueError("Invalid magnet link")
+
+    if len(query_string["tr"]) != 1:
+        raise ValueError("Invalid magnet link")
+
+    if not query_string["xt"][0].startswith("urn:btih:"):
+        raise ValueError("Invalid magnet link")
+
+    info_hash = binascii.unhexlify(query_string["xt"][0][9:])
+
+    return {
+        "info_hash": info_hash,
+        "info": {
+            "length": 999,
+        },
+        "announce": query_string["tr"][0].encode(),
+    }
+ 
+
 async def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
@@ -1021,6 +1063,9 @@ async def main():
 
     magnet_parse_cmd = subparsers.add_parser("magnet_parse")
     magnet_parse_cmd.add_argument("magnet_link", help="Magnet link to parse")
+
+    magnet_handshake_cmd = subparsers.add_parser("magnet_handshake")
+    magnet_handshake_cmd.add_argument("magnet_link", help="Magnet link to parse")
 
     args = parser.parse_args()
 
@@ -1084,13 +1129,24 @@ async def main():
             await download_file(args.file, args.o)
 
         case "magnet_parse":
-            if not args.magnet_link.startswith("magnet:?"):
-                raise ValueError("Invalid magnet link")
+            magnet_link = parse_magnetic_link(args.magnet_link)
+            print("Tracker URL:", get_torrent_url(magnet_link))
+            print("Info Hash:", binascii.hexlify(generate_info_hash(magnet_link)).decode())
 
-            query_string = parse_qs(args.magnet_link[8:])
-            print("Tracker URL:", query_string["tr"][0])
-            print("Info Hash:", query_string["xt"][0][9:])
-    
+        case "magnet_handshake":
+            magnet_link = parse_magnetic_link(args.magnet_link)
+            tracker_data = query_tracker(magnet_link)
+            peers = get_peers(tracker_data)
+
+            if len(peers) == 0:
+                raise ValueError("No peers found")
+
+            peer = peers[0]
+            
+            async with Tracker((peer.ip, peer.port)) as tracker:
+                resp = await tracker_handshake(magnet_link, tracker)
+                print("Peer ID:", resp.peer_id.hex())
+
         case _:
             parser.print_help()
         
