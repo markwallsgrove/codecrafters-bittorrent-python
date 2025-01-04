@@ -598,7 +598,12 @@ class Tracker(object):
     async def _connect(self, conn: tuple[str, int]) -> None:
         self._reader, self._writer = await asyncio.open_connection(conn[0], conn[1])
 
-    async def handshake(self, info_hash: bytes, peer_id: bytes) -> TrackerPeersResponse:
+    async def handshake(
+            self,
+            info_hash: bytes,
+            peer_id: bytes,
+            reserved_bits: bytes=b"\x00\x00\x00\x00\x00\x00\x00\x00",
+    ) -> TrackerPeersResponse:
         # TODO: could this be a peer message instead?
         # Unsure if it can because the message begins with with the number
         # 19, which is the length of the protocol string. The length of the
@@ -608,7 +613,8 @@ class Tracker(object):
         # Would we read the payload which is the protocol string and then
         # read another 49 bytes to get the rest of the message?
 
-        h = b"\x13BitTorrent protocol\x00\x00\x00\x00\x00\x00\x00\x00" \
+        h = b"\x13BitTorrent protocol" \
+            + reserved_bits \
             + info_hash \
             + peer_id
 
@@ -671,10 +677,14 @@ def generate_peer_id() -> bytes:
     return (prefix + random_part).encode("utf-8")
 
 
-async def tracker_handshake(torrent_data: dict[str, ValueType], tracker: Tracker) -> TrackerPeersResponse:
+async def tracker_handshake(
+        torrent_data: dict[str, ValueType],
+        tracker: Tracker,
+        reserved_bits: bytes=b"\x00\x00\x00\x00\x00\x00\x00\x00",
+) -> TrackerPeersResponse:
     info_hash = generate_info_hash(torrent_data)
     peer_id = generate_peer_id()
-    return await tracker.handshake(info_hash, peer_id)
+    return await tracker.handshake(info_hash, peer_id, reserved_bits)
 
 
 def get_length(torrent_data: dict[str, ValueType]) -> int:
@@ -1119,7 +1129,8 @@ async def main():
             conn = parse_connection_string(args.connection)
 
             async with Tracker(conn) as tracker:
-                resp = await tracker_handshake(args.file, tracker)
+                torrent_data = decode_torrent_file(args.file)
+                resp = await tracker_handshake(torrent_data, tracker)
                 print("Peer ID:", resp.peer_id.hex())
 
         case "download_piece":
@@ -1144,7 +1155,11 @@ async def main():
             peer = peers[0]
             
             async with Tracker((peer.ip, peer.port)) as tracker:
-                resp = await tracker_handshake(magnet_link, tracker)
+                resp = await tracker_handshake(
+                    magnet_link,
+                    tracker,
+                    b"\x00\x00\x00\x00\x00\x10\x00\x00",
+                )
                 print("Peer ID:", resp.peer_id.hex())
 
         case _:
