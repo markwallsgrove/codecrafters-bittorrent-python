@@ -298,6 +298,59 @@ class Bitfield(PeerMesage):
         return encode_integer(len(payload)) + payload
 
 
+@dataclass
+class ExtensionHandshake(PeerMesage):
+    extension_id: int
+    extensions: dict[str, int]
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "ExtensionHandshake":
+        length = parse_integer(data[0:4])
+        id = parse_integer(data[4:5])
+        payload = data[5:]
+        extended_id = parse_integer(payload[0:1])
+        opt_handshake = decode(payload[1:])
+
+        if opt_handshake is None:
+            raise ValueError(f"Invalid extension handshake: {payload}")
+
+        handshake, _ = opt_handshake
+
+        if type(handshake) != dict:
+            raise ValueError(f"Invalid extension handshake: {handshake}")
+
+        extensions: dict[str, int] = {}
+        if "m" in handshake.keys():
+            m = handshake.get("m")
+
+            if type(m) is not dict:
+                raise ValueError("unexpected m structure")
+
+            for k, v in m.items():
+                if type(k) != str:
+                    raise ValueError(f"Invalid extension handshake: {k}")
+
+                if type(v) != int:
+                    raise ValueError(f"Invalid extension handshake: {v}")
+
+                extensions[k] = v
+
+        return cls(
+            message_length=length,
+            message_id=id,
+            message_payload=payload,
+            extension_id=extended_id,
+            extensions=extensions,
+        )
+
+    def encode(self) -> bytes:
+        message_id = encode_id(self.message_id)
+        extension_id = encode_id(self.extension_id)
+        handshake = encode({"m": self.extensions})
+        payload = message_id + extension_id + handshake
+        return encode_integer(len(payload)) + payload
+
+
 def decode_peer_message(data: bytes) -> Optional[PeerMesage]:
     id = parse_integer(data[4:5])
 
@@ -314,9 +367,12 @@ def decode_peer_message(data: bytes) -> Optional[PeerMesage]:
             return Piece.from_bytes(data)
         case 14:
             return Port.from_bytes(data)
+        case 20:
+            return ExtensionHandshake.from_bytes(data)
         case 121:
             return Extended.from_bytes(data)
         case _:
+            global_logger.warning(f"Ignoring message with id %{id}")
             return None
 
 
@@ -1160,7 +1216,27 @@ async def main():
                     tracker,
                     b"\x00\x00\x00\x00\x00\x10\x00\x00",
                 )
+
                 print("Peer ID:", resp.peer_id.hex())
+
+                while True:
+                    message = await tracker.listen_for_messages()
+
+                    match message:
+                        case Bitfield():
+                            await tracker.send_message(ExtensionHandshake(5, 20, b"", 0, {
+                                "ut_metadata": 1,
+                            }))
+
+                        case ExtensionHandshake():
+                            print(f"Extension handshake: {message.extensions}")
+                            break
+
+                        case None:
+                            pass
+
+                        case _:
+                            global_logger.debug(f"Unknown message: {message}")
 
         case _:
             parser.print_help()
