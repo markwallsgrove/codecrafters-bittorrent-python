@@ -1229,7 +1229,9 @@ async def main():
                             }))
 
                         case ExtensionHandshake():
-                            print(f"Extension handshake: {message.extensions}")
+                            if "ut_metadata" in message.extensions.keys():
+                                print(f"Peer Metadata Extension ID: {message.extensions.get("ut_metadata")}")
+
                             break
 
                         case None:
