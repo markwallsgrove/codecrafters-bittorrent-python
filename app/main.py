@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 import json
 import math
 import os
-from typing import Any, Awaitable, Callable, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Optional, Tuple, TypeVar, Union
 from logging import Logger, getLevelNamesMapping, getLogger, basicConfig, WARN
 from hashlib import sha1
 from urllib.parse import urlencode, parse_qs
@@ -245,33 +245,6 @@ class Piece(PeerMessage):
        ")"
 
 
-# @dataclass
-# class Extended(PeerMessage):
-#     extended_id: int
-#
-#     id = 121
-#
-#     @classmethod
-#     def from_bytes(cls, data: bytes) -> "Extended":
-#         length = parse_integer(data[0:4])
-#         id = parse_integer(data[4:5])
-#         extended_id = parse_integer(data[5:6])
-#
-#         if length != 2:
-#             raise ValueError(f"Invalid Extended message length: {length}")
-#
-#         if id != cls.id:
-#             raise ValueError(f"Invalid Extended message id: {id}")
-#
-#         return cls(
-#             extended_id=extended_id,
-#         )
-#
-#     def encode(self) -> bytes:
-#         payload = encode_id(self.id) + encode_id(self.extended_id)
-#         return encode_integer(len(payload)) + payload
-
-
 @dataclass
 class Bitfield(PeerMessage):
     bitfield: bytes
@@ -299,15 +272,46 @@ class Bitfield(PeerMessage):
         return encode_integer(len(payload)) + payload
 
 
+T = TypeVar("T")
 @dataclass
-class ExtensionHandshake(PeerMessage):
+class Extension(PeerMessage):
     extension_id: int
-    extensions: dict[str, int]
+    metadata: dict[str, Any]
+    contents: Optional[ValueType]
 
-    id = 20
+    id: int = 20
+
+    def m(self) -> dict[str, int]:
+        extensions: dict[str, int] = {}
+
+        m = self.metadata.get("m")
+        if m is not None:
+            if type(m) is not dict:
+                raise ValueError("unexpected m structure")
+
+            for k, v in m.items():
+                if type(k) != str:
+                    raise ValueError(f"Invalid extension handshake: {k}")
+
+                if type(v) != int:
+                    raise ValueError(f"Invalid extension handshake: {v}")
+
+                extensions[k] = v
+
+        return extensions
+
+    def get(self, key: str, t: T) -> Optional[T]:
+        value = self.metadata.get(key)
+        if value is None:
+            return t
+
+        if type(value) != t:
+            raise ValueError(f"Invalid extension handshake: {value}")
+
+        return value
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "ExtensionHandshake":
+    def from_bytes(cls, data: bytes) -> "Extension":
         length = parse_integer(data[0:4])
         id = parse_integer(data[4:5])
         payload = data[5:]
@@ -323,36 +327,26 @@ class ExtensionHandshake(PeerMessage):
         if opt_handshake is None:
             raise ValueError(f"Invalid extension handshake: {payload}")
 
-        handshake, _ = opt_handshake
+        metadata, encoded_contents = opt_handshake
 
-        if type(handshake) != dict:
-            raise ValueError(f"Invalid extension handshake: {handshake}")
+        contents = None
+        decoded_contents = decode(encoded_contents)
+        if decoded_contents is not None:
+            contents, _ = decoded_contents
 
-        extensions: dict[str, int] = {}
-        if "m" in handshake.keys():
-            m = handshake.get("m")
-
-            if type(m) is not dict:
-                raise ValueError("unexpected m structure")
-
-            for k, v in m.items():
-                if type(k) != str:
-                    raise ValueError(f"Invalid extension handshake: {k}")
-
-                if type(v) != int:
-                    raise ValueError(f"Invalid extension handshake: {v}")
-
-                extensions[k] = v
+        if type(metadata) != dict:
+            raise ValueError(f"Invalid extension handshake: {metadata}")
 
         return cls(
             extension_id=extended_id,
-            extensions=extensions,
+            metadata=metadata,
+            contents=contents,
         )
 
     def encode(self) -> bytes:
         message_id = encode_id(self.id)
         extension_id = encode_id(self.extension_id)
-        handshake = encode({"m": self.extensions})
+        handshake = encode(self.metadata)
         payload = message_id + extension_id + handshake
         return encode_integer(len(payload)) + payload
 
@@ -373,10 +367,8 @@ def decode_peer_message(data: bytes) -> Optional[PeerMessage]:
             return Piece.from_bytes(data)
         case Port.id:
             return Port.from_bytes(data)
-        case ExtensionHandshake.id:
-            return ExtensionHandshake.from_bytes(data)
-        # case 121:
-        #     return Extended.from_bytes(data)
+        case Extension.id:
+            return Extension.from_bytes(data)
         case _:
             global_logger.warning(f"Ignoring message with id %{id}")
             return None
@@ -445,6 +437,9 @@ def decode_string(value: bytes) -> Optional[Tuple[bytes, bytes]]:
 
 
 def decode_list(value: bytes) -> Optional[Tuple[list[ValueType], bytes]]:
+    if len(value) < 2:
+        return None
+
     header, body = value[0], value[1:]
 
     if header != ord("l"):
@@ -477,6 +472,9 @@ def decode_list(value: bytes) -> Optional[Tuple[list[ValueType], bytes]]:
 
 
 def decode_dict(value: bytes) -> Optional[Tuple[dict[ValueType, ValueType], bytes]]:
+    if len(value) < 2:
+        return None
+
     header, body = value[0], value[1:]
     if header != ord("d"):
         return None
@@ -517,6 +515,9 @@ def decode_dict(value: bytes) -> Optional[Tuple[dict[ValueType, ValueType], byte
 
 def decode(value: bytes) -> Optional[Tuple[ValueType, bytes]]:
     decorder = [decode_int, decode_string, decode_list, decode_dict]
+
+    if len(value) == 0:
+        return None
 
     for decoder in decorder:
         decoded_value = decoder(value[:])
@@ -647,21 +648,6 @@ class PieceMeta(object):
         ]
 
 
-@dataclass
-class MetadataRequest(PeerMessage):
-    msg_type: int
-    piece: int
-    extension_msg_id: int
-    msg_id: int = 20
-
-    def encode(self) -> bytes:
-        extension_msg_id = encode_id(self.extension_msg_id)
-        req = encode({"msg_type": self.msg_type, "piece": self.piece})
-        msg_id = encode_id(self.msg_id)
-        payload = msg_id + extension_msg_id + req
-        return encode_integer(len(payload)) + payload
-
-
 class Tracker(object):
     _reader: asyncio.StreamReader
     _writer: asyncio.StreamWriter
@@ -752,9 +738,9 @@ def generate_peer_id() -> bytes:
 
 
 async def tracker_handshake(
-        torrent_data: dict[str, ValueType],
-        tracker: Tracker,
-        reserved_bits: bytes=b"\x00\x00\x00\x00\x00\x00\x00\x00",
+    torrent_data: dict[str, ValueType],
+    tracker: Tracker,
+    reserved_bits: bytes=b"\x00\x00\x00\x00\x00\x00\x00\x00",
 ) -> TrackerPeersResponse:
     info_hash = generate_info_hash(torrent_data)
     peer_id = generate_peer_id()
@@ -871,7 +857,10 @@ def parse_connection_string(connection: str) -> Tuple[str, int]:
     return host, port
 
 
-def pieces_hashes(pieces: bytes) -> list[bytes]:
+def pieces_hashes(pieces: bytes | None) -> list[bytes]:
+    if pieces is None:
+        raise ValueError("Invalid pieces")
+
     return [
         pieces[x : x + 20]
         for x
@@ -1117,6 +1106,23 @@ def parse_magnetic_link(magnet_link: str) -> dict[str, ValueType]:
         },
         "announce": query_string["tr"][0].encode(),
     }
+
+
+def get_dict_value(data: Any, key: str, t: type[T]) -> Optional[T]:
+    if data is None:
+        return None
+
+    if type(data) != dict:
+        raise ValueError(f"Invalid data type: {type(data)}")
+
+    value = data.get(key)
+    if value is None:
+        return None
+
+    if type(value) != t:
+        raise ValueError(f"Invalid value for key: {key}")
+
+    return value
  
 
 async def main():
@@ -1245,12 +1251,18 @@ async def main():
 
                     match message:
                         case Bitfield():
-                            await tracker.send_message(ExtensionHandshake(0, {
-                                "ut_metadata": 1,
-                            }))
+                            await tracker.send_message(Extension(
+                                0,
+                                {
+                                    "m": {
+                                        "ut_metadata": 1,
+                                    },
+                                },
+                                None,
+                            ))
 
-                        case ExtensionHandshake():
-                            ut_metadata_id = message.extensions.get("ut_metadata")
+                        case Extension():
+                            ut_metadata_id = message.m().get("ut_metadata")
                             if ut_metadata_id is not None:
                                 print(f"Peer Metadata Extension ID: {ut_metadata_id}")
 
@@ -1273,37 +1285,63 @@ async def main():
             peer = peers[0]
             
             async with Tracker((peer.ip, peer.port)) as tracker:
+                print(f"Tracker URL: {get_torrent_url(magnet_link)}")
                 resp = await tracker_handshake(
                     magnet_link,
                     tracker,
                     b"\x00\x00\x00\x00\x00\x10\x00\x00",
                 )
 
-                print("Peer ID:", resp.peer_id.hex())
-
                 while True:
                     message = await tracker.listen_for_messages()
 
                     match message:
                         case Bitfield():
-                            await tracker.send_message(ExtensionHandshake(0, {
-                                "ut_metadata": 1,
-                            }))
+                            await tracker.send_message(Extension(
+                                0,
+                                {
+                                    "m": {
+                                        "ut_metadata": 1,
+                                    },
+                                },
+                                None,
+                            ))
 
-                        case ExtensionHandshake():
-                            ut_metadata_id = message.extensions.get("ut_metadata")
-                            if ut_metadata_id is not None:
-                                print(f"Peer Metadata Extension ID: {ut_metadata_id}")
-                                await tracker.send_message(MetadataRequest(0, 0, ut_metadata_id))
+                        case Extension():
+                            if message.extension_id == 0:
+                                ut_metadata_id = get_dict_value(message.m(), "ut_metadata", int)
+                                if ut_metadata_id is None:
+                                    continue
 
-                            break
+                                await tracker.send_message(
+                                    Extension(
+                                        ut_metadata_id,
+                                        {
+                                            "msg_type": 0,
+                                            "piece": 0,
+                                        },
+                                         None,
+                                    )
+                                )
+                            elif message.extension_id == 1:
+                                length = get_dict_value(message.contents, "length", int)
+                                piece_length = get_dict_value(message.contents, "piece length", int)
+                                hashes = pieces_hashes(get_dict_value(message.contents, "pieces", bytes))
+
+                                print(f"Length: {length}")
+                                print("Info Hash:", binascii.hexlify(generate_info_hash(magnet_link)).decode())
+                                print(f"Piece Length: {piece_length}")
+                                print("Piece Hashes:")
+                                for hash in hashes:
+                                    print(hash.hex())
+
+                                break
 
                         case None:
                             pass
 
                         case _:
                             global_logger.debug(f"Unknown message: {message}")
-
 
 
         case _:
