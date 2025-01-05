@@ -61,19 +61,20 @@ class TrackerPeersResponse:
 
 
 @dataclass
-class PeerMesage(ABC):
-    message_length: int
-    message_id: int
-    message_payload: bytes
+class PeerMessage(ABC):
+    # message_length: int
+    # message_id: int
+    # message_payload: bytes
 
     @abstractmethod
     def encode(self) -> bytes:
-        pass
+        raise NotImplementedError("encode method not implemented")
 
 
 @dataclass
-class Have(PeerMesage):
+class Have(PeerMessage):
     piece_index: int
+    id = 4
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Have":
@@ -82,24 +83,22 @@ class Have(PeerMesage):
             raise ValueError(f"Invalid Have message length: {length}")
 
         id = parse_integer(data[4:5])
-        if id != 4:
+        if id != cls.id:
             raise ValueError(f"Invalid Have message id: {id}")
 
         return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=data[5:],
             piece_index=parse_integer(data[5:]),
         )
 
     def encode(self) -> bytes:
-        payload = encode_integer(self.message_id) + encode_integer(self.piece_index)
+        payload = encode_integer(self.id) + encode_integer(self.piece_index)
         return encode_integer(len(payload)) + payload
 
 
 @dataclass
-class Port(PeerMesage):
+class Port(PeerMessage):
     port: int
+    id = 14
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Port":
@@ -108,7 +107,7 @@ class Port(PeerMesage):
             raise ValueError(f"Invalid Port message length: {length}")
 
         id = int.from_bytes(data[4:5])
-        if id != 14:
+        if id != cls.id:
             raise ValueError(f"Invalid Have message id: {id}")
 
         port = 0
@@ -116,23 +115,22 @@ class Port(PeerMesage):
             port = parse_integer(data[5:])
 
         return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=data[5:],
             port=port,
         )
 
     def encode(self) -> bytes:
         if self.port > 0:
-            payload = encode_integer(self.message_id) + encode_integer(self.port)
+            payload = encode_integer(self.id) + encode_integer(self.port)
             return encode_integer(len(payload)) + payload
 
-        payload = encode_integer(self.message_id)
+        payload = encode_integer(14)
         return encode_integer(len(payload)) + payload
 
 
 @dataclass
-class Interested(PeerMesage):
+class Interested(PeerMessage):
+    id = 2
+
     @classmethod
     def from_bytes(cls, data: bytes) -> "Interested":
         length = parse_integer(data[0:4])
@@ -140,22 +138,20 @@ class Interested(PeerMesage):
             raise ValueError(f"Invalid Interested message length: {length}")
 
         id = parse_integer(data[4:5])
-        if id != 2:
+        if id != cls.id:
             raise ValueError(f"Invalid Interested message id: {id}")
 
-        return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=data[5:],
-        )
+        return cls()
 
     def encode(self) -> bytes:
-        payload = encode_id(self.message_id)
+        payload = encode_id(self.id)
         return encode_integer(len(payload)) + payload
 
 
 @dataclass
-class Unchoke(PeerMesage):
+class Unchoke(PeerMessage):
+    id = 1
+
     @classmethod
     def from_bytes(cls, data: bytes) -> "Unchoke":
         length = parse_integer(data[0:4])
@@ -163,25 +159,23 @@ class Unchoke(PeerMesage):
             raise ValueError(f"Invalid Unchoke message length: {length}")
 
         id = parse_integer(data[4:5])
-        if id != 1:
+        if id != cls.id:
             raise ValueError(f"Invalid Unchoke message id: {id}")
 
-        return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=data[5:],
-        )
+        return cls()
 
     def encode(self) -> bytes:
-        payload = encode_id(self.message_id)
+        payload = encode_id(self.id)
         return encode_integer(len(payload)) + payload
 
 
 @dataclass
-class Request(PeerMesage):
+class Request(PeerMessage):
     index: int
     begin: int
     length: int
+
+    id = 6
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Request":
@@ -190,20 +184,17 @@ class Request(PeerMesage):
             raise ValueError(f"Invalid Request message length: {length}")
 
         id = parse_integer(data[4:5])
-        if id != 6:
+        if id != cls.id:
             raise ValueError(f"Invalid Request message id: {id}")
 
         return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=data[5:],
             index=parse_integer(data[5:9]),
             begin=parse_integer(data[9:13]),
             length=parse_integer(data[13:]),
         )
 
     def encode(self) -> bytes:
-        payload = encode_id(self.message_id) \
+        payload = encode_id(self.id) \
             + encode_integer(self.index) \
             + encode_integer(self.begin) \
             + encode_integer(self.length)
@@ -212,10 +203,12 @@ class Request(PeerMesage):
 
 
 @dataclass
-class Piece(PeerMesage):
+class Piece(PeerMessage):
     index: int
     begin: int
     block: bytes
+
+    id = 7
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Piece":
@@ -225,17 +218,17 @@ class Piece(PeerMesage):
         begin = parse_integer(data[9:13]) # 4 bytes
         block = data[13:]
 
+        if id != cls.id:
+            raise ValueError(f"Invalid Piece message id: {id}")
+
         return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=data[5:],
             index=index,
             begin=begin,
             block=block,
         )
 
     def encode(self) -> bytes:
-        payload = encode_id(self.message_id) \
+        payload = encode_id(self.id) \
             + encode_integer(self.index) \
             + encode_integer(self.begin) \
             + self.block
@@ -247,38 +240,43 @@ class Piece(PeerMesage):
             f"index={self.index}, " + \
             f"begin={self.begin}, " + \
             f"block=<truncated>, " + \
-            f"message_id={self.message_id}, " + \
-            f"message_length={self.message_length}, " + \
+            f"message_id={self.id}, " + \
             f"block_length={len(self.block)}" + \
        ")"
 
 
+# @dataclass
+# class Extended(PeerMessage):
+#     extended_id: int
+#
+#     id = 121
+#
+#     @classmethod
+#     def from_bytes(cls, data: bytes) -> "Extended":
+#         length = parse_integer(data[0:4])
+#         id = parse_integer(data[4:5])
+#         extended_id = parse_integer(data[5:6])
+#
+#         if length != 2:
+#             raise ValueError(f"Invalid Extended message length: {length}")
+#
+#         if id != cls.id:
+#             raise ValueError(f"Invalid Extended message id: {id}")
+#
+#         return cls(
+#             extended_id=extended_id,
+#         )
+#
+#     def encode(self) -> bytes:
+#         payload = encode_id(self.id) + encode_id(self.extended_id)
+#         return encode_integer(len(payload)) + payload
+
+
 @dataclass
-class Extended(PeerMesage):
-    extended_id: int
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "Extended":
-        length = parse_integer(data[0:4])
-        id = parse_integer(data[4:5])
-        extended_id = parse_integer(data[5:6])
-        payload = data[6:]
-
-        return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=payload,
-            extended_id=extended_id,
-        )
-
-    def encode(self) -> bytes:
-        payload = encode_id(self.message_id) + encode_id(self.extended_id) + self.message_payload
-        return encode_integer(len(payload)) + payload
-
-
-@dataclass
-class Bitfield(PeerMesage):
+class Bitfield(PeerMessage):
     bitfield: bytes
+
+    id = 5
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "Bitfield":
@@ -286,22 +284,27 @@ class Bitfield(PeerMesage):
         id = parse_integer(data[4:5])
         bitfield = data[5:]
 
+        if length != len(bitfield) + 1:
+            raise ValueError(f"Invalid Bitfield message length: {length}")
+
+        if id != cls.id:
+            raise ValueError(f"Invalid Bitfield message id: {id}") 
+
         return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=bitfield,
             bitfield=bitfield,
         )
 
     def encode(self) -> bytes:
-        payload = encode_id(self.message_id) + self.bitfield
+        payload = encode_id(self.id) + self.bitfield
         return encode_integer(len(payload)) + payload
 
 
 @dataclass
-class ExtensionHandshake(PeerMesage):
+class ExtensionHandshake(PeerMessage):
     extension_id: int
     extensions: dict[str, int]
+
+    id = 20
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "ExtensionHandshake":
@@ -310,6 +313,12 @@ class ExtensionHandshake(PeerMesage):
         payload = data[5:]
         extended_id = parse_integer(payload[0:1])
         opt_handshake = decode(payload[1:])
+
+        if length != len(payload) + 1:
+            raise ValueError(f"Invalid ExtensionHandshake message length: {length}")
+
+        if id != cls.id:
+            raise ValueError(f"Invalid ExtensionHandshake message id: {id}")
 
         if opt_handshake is None:
             raise ValueError(f"Invalid extension handshake: {payload}")
@@ -336,41 +345,38 @@ class ExtensionHandshake(PeerMesage):
                 extensions[k] = v
 
         return cls(
-            message_length=length,
-            message_id=id,
-            message_payload=payload,
             extension_id=extended_id,
             extensions=extensions,
         )
 
     def encode(self) -> bytes:
-        message_id = encode_id(self.message_id)
+        message_id = encode_id(self.id)
         extension_id = encode_id(self.extension_id)
         handshake = encode({"m": self.extensions})
         payload = message_id + extension_id + handshake
         return encode_integer(len(payload)) + payload
 
 
-def decode_peer_message(data: bytes) -> Optional[PeerMesage]:
+def decode_peer_message(data: bytes) -> Optional[PeerMessage]:
     id = parse_integer(data[4:5])
 
     match id:
-        case 1:
+        case Unchoke.id:
             return Unchoke.from_bytes(data)
-        case 2:
+        case Interested.id:
             return Interested.from_bytes(data)
-        case 4:
+        case Have.id:
             return Have.from_bytes(data)
-        case 5:
+        case Bitfield.id:
             return Bitfield.from_bytes(data)
-        case 7:
+        case Piece.id:
             return Piece.from_bytes(data)
-        case 14:
+        case Port.id:
             return Port.from_bytes(data)
-        case 20:
+        case ExtensionHandshake.id:
             return ExtensionHandshake.from_bytes(data)
-        case 121:
-            return Extended.from_bytes(data)
+        # case 121:
+        #     return Extended.from_bytes(data)
         case _:
             global_logger.warning(f"Ignoring message with id %{id}")
             return None
@@ -641,6 +647,21 @@ class PieceMeta(object):
         ]
 
 
+@dataclass
+class MetadataRequest(PeerMessage):
+    msg_type: int
+    piece: int
+    extension_msg_id: int
+    msg_id: int = 20
+
+    def encode(self) -> bytes:
+        extension_msg_id = encode_id(self.extension_msg_id)
+        req = encode({"msg_type": self.msg_type, "piece": self.piece})
+        msg_id = encode_id(self.msg_id)
+        payload = msg_id + extension_msg_id + req
+        return encode_integer(len(payload)) + payload
+
+
 class Tracker(object):
     _reader: asyncio.StreamReader
     _writer: asyncio.StreamWriter
@@ -679,7 +700,7 @@ class Tracker(object):
 
         return TrackerPeersResponse.from_bytes(await self._reader.read(68))
 
-    async def listen_for_messages(self) -> Optional[PeerMesage]:
+    async def listen_for_messages(self) -> Optional[PeerMessage]:
         try:
             message_length_bytes = await self._reader.readexactly(4)
         except asyncio.IncompleteReadError:
@@ -699,15 +720,12 @@ class Tracker(object):
         assert len(payload) == message_length, f"Invalid message length: {len(payload)} != {message_length}"
         return decode_peer_message(message_length_bytes + payload)
 
-    async def send_message(self, message: PeerMesage) -> None:
+    async def send_message(self, message: PeerMessage) -> None:
         self._writer.write(message.encode())
         await self._writer.drain()
 
     async def start_piece_downloads(self, piece_index: int, piece_begin: int, piece_length: int) -> Optional[int]:
         await self.send_message(Request(
-            13,
-            6,
-            b"",
             piece_index,
             piece_begin,
             piece_length,
@@ -888,7 +906,7 @@ async def handle_tracker(
                     logger.debug(f"Bitfield: {available_pieces}, {message.bitfield}")
                     logger.debug("Interested")
                     # TODO: check if there are pieces that are of interest
-                    await tracker.send_message(Interested(1, 2, b""))
+                    await tracker.send_message(Interested())
                 case Unchoke():
                     unchoked = True
                     logger.debug("Unchoked")
@@ -1133,6 +1151,9 @@ async def main():
     magnet_handshake_cmd = subparsers.add_parser("magnet_handshake")
     magnet_handshake_cmd.add_argument("magnet_link", help="Magnet link to parse")
 
+    magnet_info_cmd = subparsers.add_parser("magnet_info")
+    magnet_info_cmd.add_argument("magnet_link", help="Magnet link to parse")
+
     args = parser.parse_args()
 
     match args.command:
@@ -1224,13 +1245,14 @@ async def main():
 
                     match message:
                         case Bitfield():
-                            await tracker.send_message(ExtensionHandshake(5, 20, b"", 0, {
+                            await tracker.send_message(ExtensionHandshake(0, {
                                 "ut_metadata": 1,
                             }))
 
                         case ExtensionHandshake():
-                            if "ut_metadata" in message.extensions.keys():
-                                print(f"Peer Metadata Extension ID: {message.extensions.get("ut_metadata")}")
+                            ut_metadata_id = message.extensions.get("ut_metadata")
+                            if ut_metadata_id is not None:
+                                print(f"Peer Metadata Extension ID: {ut_metadata_id}")
 
                             break
 
@@ -1239,6 +1261,50 @@ async def main():
 
                         case _:
                             global_logger.debug(f"Unknown message: {message}")
+
+        case "magnet_info":
+            magnet_link = parse_magnetic_link(args.magnet_link)
+            tracker_data = query_tracker(magnet_link)
+            peers = get_peers(tracker_data)
+
+            if len(peers) == 0:
+                raise ValueError("No peers found")
+
+            peer = peers[0]
+            
+            async with Tracker((peer.ip, peer.port)) as tracker:
+                resp = await tracker_handshake(
+                    magnet_link,
+                    tracker,
+                    b"\x00\x00\x00\x00\x00\x10\x00\x00",
+                )
+
+                print("Peer ID:", resp.peer_id.hex())
+
+                while True:
+                    message = await tracker.listen_for_messages()
+
+                    match message:
+                        case Bitfield():
+                            await tracker.send_message(ExtensionHandshake(0, {
+                                "ut_metadata": 1,
+                            }))
+
+                        case ExtensionHandshake():
+                            ut_metadata_id = message.extensions.get("ut_metadata")
+                            if ut_metadata_id is not None:
+                                print(f"Peer Metadata Extension ID: {ut_metadata_id}")
+                                await tracker.send_message(MetadataRequest(0, 0, ut_metadata_id))
+
+                            break
+
+                        case None:
+                            pass
+
+                        case _:
+                            global_logger.debug(f"Unknown message: {message}")
+
+
 
         case _:
             parser.print_help()
