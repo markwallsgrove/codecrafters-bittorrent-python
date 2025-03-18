@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 import json
-import inspect
 import math
 import os
 from typing import Any, Awaitable, Callable, Coroutine, Generic, Optional, Tuple, TypeVar, Union, Type
@@ -1138,16 +1137,11 @@ class Listeners(Generic[S]):
     def __init__(self):
         self._listeners = {}
 
-    def add(self, *cbs: Callable[[S], Coroutine[Any, Any, None]]) -> None:
-        for cb in cbs:
-            sig = inspect.signature(cb)
-            first_arg = list(sig.parameters.keys())[0]
-            key = sig.parameters[first_arg].annotation
+    def add(self, key: Type[S], cb: Callable[[S], Coroutine[Any, Any, None]]) -> None:
+        if cb not in self._listeners:
+            self._listeners[key] = set()
 
-            if key not in self._listeners:
-                self._listeners[key] = set()
-
-            self._listeners[key].add(cb)
+        self._listeners[key].add(cb)
 
     async def notify(self, key: type, message: S) -> None:
         for cb in self._listeners.get(key, set()):
@@ -1157,7 +1151,6 @@ class Listeners(Generic[S]):
 class MagnetLinkTracker(object):
     magnet_link: dict[str, ValueType]
     tracker_data: dict[str, ValueType]
-    handshake: Optional[TrackerPeersResponse] = None
 
     _tracker: Optional[Tracker]
     _peers: list[Peer]
@@ -1178,7 +1171,8 @@ class MagnetLinkTracker(object):
         self._tracker = Tracker((peer.ip, peer.port))
         await self._tracker.__aenter__()
 
-        self.handshake = await tracker_handshake(
+        print(f"Tracker URL: {get_torrent_url(self.magnet_link)}")
+        resp = await tracker_handshake(
             self.magnet_link,
             self._tracker,
             b"\x00\x00\x00\x00\x00\x10\x00\x00",
@@ -1320,10 +1314,7 @@ async def main():
             listening = True
 
             async with MagnetLinkTracker(args.magnet_link) as tracker:
-                if tracker.handshake is not None:
-                    print("Peer ID:", tracker.handshake.peer_id.hex())
-
-                async def bitfield(_: Bitfield) -> None:
+                async def bitfield(message: Bitfield) -> None:
                     await tracker.send_message(Extension(
                         0,
                         {
@@ -1342,7 +1333,8 @@ async def main():
                     nonlocal listening
                     listening = False
 
-                tracker.listeners().add(bitfield, extension)
+                tracker.listeners().add(Bitfield, bitfield)
+                tracker.listeners().add(Extension, extension)
 
                 while listening:
                     await tracker.communicate()
@@ -1351,8 +1343,58 @@ async def main():
             listening = True
 
             async with MagnetLinkTracker(args.magnet_link) as tracker:
-                print(f"Tracker URL: {get_torrent_url(tracker.magnet_link)}")
+                async def bitfield(message: Bitfield) -> None:
+                    await tracker.send_message(Extension(
+                        0,
+                        {
+                            "m": {
+                                "ut_metadata": 1,
+                            },
+                        },
+                        None,
+                    ))
 
+                async def extension(message: Extension) -> None:
+                    if message.extension_id == 0:
+                        ut_metadata_id = get_dict_value(message.m(), "ut_metadata", int)
+                        if ut_metadata_id is None:
+                            return
+
+                        await tracker.send_message(
+                            Extension(
+                                ut_metadata_id,
+                                {
+                                    "msg_type": 0,
+                                    "piece": 0,
+                                },
+                                 None,
+                            )
+                        )
+                    elif message.extension_id == 1:
+                        length = get_dict_value(message.contents, "length", int)
+                        piece_length = get_dict_value(message.contents, "piece length", int)
+                        hashes = pieces_hashes(get_dict_value(message.contents, "pieces", bytes))
+
+                        print(f"Length: {length}")
+                        print("Info Hash:", binascii.hexlify(generate_info_hash(tracker.magnet_link)).decode())
+                        print(f"Piece Length: {piece_length}")
+                        print("Piece Hashes:")
+                        for hash in hashes:
+                            print(hash.hex())
+
+                        nonlocal listening
+                        listening = False
+
+                tracker.listeners().add(Bitfield, bitfield)
+                tracker.listeners().add(Extension, extension)
+
+                while listening:
+                    await tracker.communicate()
+
+        case "magnet_info":
+            listening = True
+
+            async with MagnetLinkTracker(args.magnet_link) as tracker:
                 async def bitfield(_: Bitfield) -> None:
                     await tracker.send_message(Extension(
                         0,
@@ -1395,58 +1437,8 @@ async def main():
                         nonlocal listening
                         listening = False
 
-                tracker.listeners().add(bitfield, extension)
-
-                while listening:
-                    await tracker.communicate()
-
-        case "magnet_info":
-            listening = True
-
-            async with MagnetLinkTracker(args.magnet_link) as tracker:
-                async def bitfield(_: Bitfield) -> None:
-                    await tracker.send_message(Extension(
-                        0,
-                        {
-                            "m": {
-                                "ut_metadata": 1,
-                            },
-                        },
-                        None,
-                    ))
-
-                async def extension(message: Extension) -> None:
-                    if message.extension_id == 0:
-                        ut_metadata_id = get_dict_value(message.m(), "ut_metadata", int)
-                        if ut_metadata_id is None:
-                            return
-
-                        await tracker.send_message(
-                            Extension(
-                                ut_metadata_id,
-                                {
-                                    "msg_type": 0,
-                                    "piece": 0,
-                                },
-                                 None,
-                            )
-                        )
-                    elif message.extension_id == 1:
-                        length = get_dict_value(message.contents, "length", int)
-                        piece_length = get_dict_value(message.contents, "piece length", int)
-                        hashes = pieces_hashes(get_dict_value(message.contents, "pieces", bytes))
-
-                        print(f"Length: {length}")
-                        print("Info Hash:", binascii.hexlify(generate_info_hash(tracker.magnet_link)).decode())
-                        print(f"Piece Length: {piece_length}")
-                        print("Piece Hashes:")
-                        for hash in hashes:
-                            print(hash.hex())
-
-                        nonlocal listening
-                        listening = False
-
-                tracker.listeners().add(bitfield, extension)
+                tracker.listeners().add(Bitfield, bitfield)
+                tracker.listeners().add(Extension, extension)
 
                 while listening:
                     await tracker.communicate()
@@ -1455,16 +1447,6 @@ async def main():
             listening = True
             output_file = args.o
             piece_index = int(args.piece)
-
-            length: int = -1
-            piece_length: int = -1
-            hashes: list[bytes] = []
-            chunks: list[ChunkMeta] = []
-
-            # truncate file
-            with open(output_file, 'w+b'):
-                pass  # File is created and truncated
-            print("Truncated output file", output_file, "size:", os.path.getsize(output_file))
 
             async with MagnetLinkTracker(args.magnet_link) as tracker:
                 async def bitfield(_: Bitfield) -> None:
@@ -1480,7 +1462,13 @@ async def main():
                         None,
                     ))
 
+                length: int = -1
+                piece_length: int = -1
+                hashes: list[bytes] = []
+
                 async def extension(message: Extension) -> None:
+                    print("Extension", message.extension_id)
+
                     if message.extension_id == 0:
                         ut_metadata_id = get_dict_value(message.m(), "ut_metadata", int)
                         if ut_metadata_id is None:
@@ -1503,67 +1491,28 @@ async def main():
                         piece_length = must(get_dict_value(message.contents, "piece length", int))
                         hashes = pieces_hashes(get_dict_value(message.contents, "pieces", bytes))
 
-                        print(f"Length: {length}")
-                        print("Info Hash:", binascii.hexlify(generate_info_hash(tracker.magnet_link)).decode())
-                        print(f"Piece Length: {piece_length}")
-                        print("Piece Hashes:")
-                        for hash in hashes:
-                            print(hash.hex())
-
                         await tracker.send_message(Interested())
 
                 async def unchoke(_: Unchoke) -> None:
-                    nonlocal piece_index, piece_length, hashes, length, chunks
+                    print("Unchoke")
+
+                    nonlocal piece_index, piece_length
                     if tracker._tracker is not None:
                         print("Starting download", piece_index, piece_length)
-                        # TODO: refactor me
+                        await tracker._tracker.start_piece_downloads(piece_index, 0, piece_length)
 
-                    amount_of_pieces = math.ceil(length / piece_length)
-                    last_piece_size = length % piece_length
-                    last_piece_index = amount_of_pieces - 1
+                async def piece(message: Piece) -> None:
+                    print("Piece", message)
 
-                    piece = PieceMeta(
-                        index=piece_index,
-                        hash=hashes[piece_index],
-                        length=last_piece_size if piece_index == last_piece_index else piece_length,
-                        pipeline_size=16 * 1024,
-                    )
+                    nonlocal listening
+                    listening = False
 
-                    chunks = piece.pipeline_chunks()
+                    print(message)
 
-                    assert tracker._tracker is not None, "Tracker not initialized"
-
-                    for chunk in chunks:
-                        await tracker._tracker.start_piece_downloads(
-                            chunk.piece_index,
-                            chunk.begin,
-                            chunk.length,
-                        )
-
-                async def piece(piece: Piece) -> None:
-                    nonlocal chunks, listening, piece_length
- 
-                    chunks = [
-                        chunk
-                        for chunk in chunks
-                        if chunk.begin != piece.begin
-                    ]
-
-                    seek_offset = -abs(piece_index * piece_length)
-                    with open(output_file, "r+b") as f:
-                        print("Writing chunk", "begin:", piece.begin, "seek:", piece_index * piece_length + piece.begin + seek_offset)
-                        f.seek(piece_index * piece_length + piece.begin + seek_offset, os.SEEK_SET)
-                        f.write(piece.block)
-                        f.flush()
-
-                    print("Downloaded chunk", piece.index, piece.begin, len(piece.block))
-
-                    if len(chunks) == 0:
-                        print("Download complete")
-                        listening = False
-
-
-                tracker.listeners().add(bitfield, extension, unchoke, piece)
+                tracker.listeners().add(Bitfield, bitfield)
+                tracker.listeners().add(Extension, extension)
+                tracker.listeners().add(Unchoke, unchoke)
+                tracker.listeners().add(Piece, piece)
 
                 while listening:
                     await tracker.communicate()
