@@ -1249,6 +1249,10 @@ async def main():
     magnet_download_piece_cmd.add_argument("magnet_link", help="Magnet link to parse")
     magnet_download_piece_cmd.add_argument("piece", help="Piece index to download", default="0")
 
+    magnet_download_cmd = subparsers.add_parser("magnet_download")
+    magnet_download_cmd.add_argument("-o", help="file to save the piece to", default="-")
+    magnet_download_cmd.add_argument("magnet_link", help="Magnet link to parse")
+    
     args = parser.parse_args()
 
     match args.command:
@@ -1561,6 +1565,141 @@ async def main():
                     if len(chunks) == 0:
                         print("Download complete")
                         listening = False
+
+
+                tracker.listeners().add(bitfield, extension, unchoke, piece)
+
+                while listening:
+                    await tracker.communicate()
+
+        case "magnet_download":
+            listening = True
+            output_file = args.o
+
+            length: int = -1
+            piece_length: int = -1
+            hashes: list[bytes] = []
+            chunks: list[ChunkMeta] = []
+            chunks_in_progress: list[ChunkMeta] = []
+
+            # truncate file
+            with open(output_file, 'w+b'):
+                pass  # File is created and truncated
+            print("Truncated output file", output_file, "size:", os.path.getsize(output_file))
+
+            async with MagnetLinkTracker(args.magnet_link) as tracker:
+                async def bitfield(_: Bitfield) -> None:
+                    print("Bitfield")
+
+                    await tracker.send_message(Extension(
+                        0,
+                        {
+                            "m": {
+                                "ut_metadata": 1,
+                            },
+                        },
+                        None,
+                    ))
+
+                async def extension(message: Extension) -> None:
+                    if message.extension_id == 0:
+                        ut_metadata_id = get_dict_value(message.m(), "ut_metadata", int)
+                        if ut_metadata_id is None:
+                            return
+
+                        await tracker.send_message(
+                            Extension(
+                                ut_metadata_id,
+                                {
+                                    "msg_type": 0,
+                                    "piece": 0,
+                                },
+                                 None,
+                            )
+                        )
+                    elif message.extension_id == 1:
+                        nonlocal length, piece_length, hashes
+
+                        length = must(get_dict_value(message.contents, "length", int))
+                        piece_length = must(get_dict_value(message.contents, "piece length", int))
+                        hashes = pieces_hashes(get_dict_value(message.contents, "pieces", bytes))
+
+                        print(f"Length: {length}")
+                        print("Info Hash:", binascii.hexlify(generate_info_hash(tracker.magnet_link)).decode())
+                        print(f"Piece Length: {piece_length}")
+                        print("Piece Hashes:")
+                        for hash in hashes:
+                            print(hash.hex())
+
+                        await tracker.send_message(Interested())
+
+                async def unchoke(_: Unchoke) -> None:
+                    nonlocal piece_length, hashes, length, chunks, chunks_in_progress
+                    print("Starting download", piece_length)
+                        # TODO: refactor me
+
+                    amount_of_pieces = math.ceil(length / piece_length)
+                    last_piece_size = length % piece_length
+                    last_piece_index = amount_of_pieces - 1
+
+                    pieces = {
+                        x: PieceMeta(
+                            index=x,
+                            hash=hashes[x],
+                            length=last_piece_size if x == last_piece_index else piece_length,
+                            pipeline_size=16 * 1024,
+                        )
+                        for x in range(amount_of_pieces)
+                    }
+
+                    chunks = [
+                        chunk
+                        for piece in pieces.values()
+                        for chunk in piece.pipeline_chunks()
+                    ]
+
+                    assert tracker._tracker is not None, "Tracker not initialized"
+
+                    for chunk in chunks[:5]:
+                        await tracker._tracker.start_piece_downloads(
+                            chunk.piece_index,
+                            chunk.begin,
+                            chunk.length,
+                        )
+                        chunks_in_progress.append(chunk)
+
+                    chunks = chunks[5:]
+
+                async def piece(piece: Piece) -> None:
+                    nonlocal chunks, listening, piece_length, chunks_in_progress
+ 
+                    print("chunks_in_progress", len(chunks_in_progress))
+                    chunks_in_progress = [
+                        chunk
+                        for chunk in chunks_in_progress
+                        if not (chunk.begin == piece.begin and chunk.piece_index == piece.index)
+                    ]
+                    print("chunks_in_progress", len(chunks_in_progress))
+
+                    with open(output_file, "r+b") as f:
+                        f.seek(piece.index * piece_length + piece.begin, os.SEEK_SET)
+                        f.write(piece.block)
+                        f.flush()
+
+                    print("Downloaded chunk", f"piece index: {piece.index}, begin: {piece.begin}, block length: {len(piece.block)}")
+
+                    if len(chunks_in_progress) == 0:
+                        print("Download complete")
+                        listening = False
+                    elif tracker and tracker._tracker and len(chunks) > 0:
+                        chunk = chunks.pop(0)
+                        await tracker._tracker.start_piece_downloads(
+                            chunk.piece_index,
+                            chunk.begin,
+                            chunk.length,
+                        )
+                        chunks_in_progress.append(chunk)
+                        print("Downloading chunk", chunk.piece_index, chunk.begin, chunk.length)
 
 
                 tracker.listeners().add(bitfield, extension, unchoke, piece)
